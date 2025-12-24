@@ -209,6 +209,6 @@ runs/           # generated artifacts (gitignored)
 
 ---
 
-## 🪪 License
+## 📜 License
 
-MIT — see `LICENSE`.
+- MIT — see [LICENSE](LICENSE).
