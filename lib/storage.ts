@@ -4,7 +4,26 @@ import path from "node:path";
 
 export const RUNS_DIR = path.join(process.cwd(), "runs");
 
+/**
+ * Vercel Serverless / Functions filesystem is ephemeral / often read-only for writes.
+ * We keep local behavior unchanged, but disable persistence on Vercel to avoid runtime errors.
+ *
+ * You can override manually:
+ * - FORCE_RUNS_PERSIST=1  => always allow writes (not recommended on Vercel)
+ * - DISABLE_RUNS_PERSIST=1 => always disable writes (useful for demo mode)
+ */
+function isRunsPersistenceEnabled(): boolean {
+  if (process.env.DISABLE_RUNS_PERSIST === "1") return false;
+  if (process.env.FORCE_RUNS_PERSIST === "1") return true;
+
+  // Vercel sets VERCEL=1 in runtime
+  if (process.env.VERCEL === "1") return false;
+
+  return true;
+}
+
 export function ensureRunsDir() {
+  if (!isRunsPersistenceEnabled()) return;
   if (!fs.existsSync(RUNS_DIR)) fs.mkdirSync(RUNS_DIR, { recursive: true });
 }
 
@@ -61,7 +80,6 @@ function normalizeContent(content: unknown): Buffer | string {
   if (typeof content === "string") return content;
 
   if (content === null || content === undefined) {
-    // Prevents: "The 'data' argument must be of type string or an instance of Buffer..."
     return "";
   }
 
@@ -90,8 +108,16 @@ function writeFileAtomic(filePath: string, data: Buffer | string) {
 /**
  * Writes a file under ./runs/<runId>/<name>
  * Accepts Buffer/string, and safely handles undefined/null to avoid crashes.
+ *
+ * On Vercel: NO-OP (disabled persistence), so the API can still return artifacts
+ * without trying to write local files.
  */
 export function writeRunFile(runId: string, name: string, content: unknown) {
+  if (!isRunsPersistenceEnabled()) {
+    // no-op on Vercel / demo mode
+    return;
+  }
+
   ensureRunsDir();
 
   const dir = safeRunDir(runId);
@@ -115,6 +141,11 @@ export function writeRunFile(runId: string, name: string, content: unknown) {
 }
 
 export function listRuns(): Array<{ runId: string; createdAt: string }> {
+  if (!isRunsPersistenceEnabled()) {
+    // No run history on Vercel (ephemeral storage)
+    return [];
+  }
+
   ensureRunsDir();
 
   const dirs = fs
@@ -141,6 +172,10 @@ export function listRuns(): Array<{ runId: string; createdAt: string }> {
 }
 
 export function readRunFile(runId: string, name: string): Buffer {
+  if (!isRunsPersistenceEnabled()) {
+    throw new Error("readRunFile is disabled in this environment (runs persistence disabled).");
+  }
+
   const dir = safeRunDir(runId);
   const safeName = safeFileName(name);
   const p = path.join(dir, safeName);
@@ -148,6 +183,8 @@ export function readRunFile(runId: string, name: string): Buffer {
 }
 
 export function runExists(runId: string): boolean {
+  if (!isRunsPersistenceEnabled()) return false;
+
   try {
     const dir = safeRunDir(runId);
     return fs.existsSync(dir);
@@ -161,6 +198,8 @@ export function runExists(runId: string): boolean {
  * Returns true if deleted, false if not deleted.
  */
 export function deleteRun(runId: string): boolean {
+  if (!isRunsPersistenceEnabled()) return false;
+
   ensureRunsDir();
   const dir = safeRunDir(runId);
 

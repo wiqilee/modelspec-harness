@@ -7,14 +7,13 @@ import { CaseSchema, SpecSchema } from "@/lib/schemas";
 import { buildSystemPrompt, localRuleChecks, summarizePass } from "@/lib/evaluator";
 import { estimateCostUSD, validateRatecard } from "@/lib/ratecard";
 
-// ✅ IMPORTANT: this must be the ONLY import for PDF/HTML/CSV generation.
-// It must point to your updated lib/reporters.ts (Node pdfkit + explicit TTF fonts).
+// IMPORTANT: this must be the ONLY import for PDF/HTML/CSV generation.
 import { toCSV, toHTML, toPDF } from "@/lib/reporters";
 
 import { writeRunFile } from "@/lib/storage";
 import type { ComplianceRow, RunBundle } from "@/lib/types";
 
-// ✅ Provider routing (OpenAI + Groq)
+// Provider routing (OpenAI + Groq)
 import {
   MODEL_REGISTRY,
   DEFAULT_AUDITOR_MODEL_ID,
@@ -25,17 +24,15 @@ import { providerChat } from "@/lib/providerClient";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// ✅ Backward compatible with older UI values ("tinker")
+// Backward compatible with older UI values ("tinker")
 type VerifierMode = "llm_auditor" | "local_only";
 
 type RunRequest = {
   specYaml: string;
   cases: Array<{ id: string; task: string; context?: string }>;
   models: string[]; // provider-prefixed ids
-
   settings?: { temperature?: number; max_tokens?: number; concurrency?: number };
   ratecard?: any[];
-
   verifierMode?: VerifierMode | "tinker";
   auditorModel?: string;
 };
@@ -68,15 +65,20 @@ type RunMeta = {
   jobErrors?: JobError[];
   fatal?: boolean;
   error?: string;
-
   artifacts?: {
     html: ArtifactStatus;
     csv: ArtifactStatus;
     jsonl: ArtifactStatus;
     pdf: ArtifactStatus;
   };
-
   warnings?: string[];
+};
+
+type InlineArtifacts = {
+  html?: { name: string; content: string; bytes: number };
+  csv?: { name: string; content: string; bytes: number };
+  jsonl?: { name: string; content: string; bytes: number };
+  pdf?: { name: string; base64: string; bytes: number };
 };
 
 function safeString(x: unknown) {
@@ -107,7 +109,7 @@ function extractHttpStatus(msg: string): number | undefined {
 }
 
 function makeRunId() {
-  const c: any = globalThis.crypto as any;
+  const c = globalThis.crypto as unknown as { randomUUID?: () => string } | undefined;
   if (c?.randomUUID) return c.randomUUID();
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
@@ -136,10 +138,21 @@ function envDiagnostics() {
   };
 }
 
-// ✅ Defensive: supports writeRunFile being sync or async + supports Buffer at runtime even if TS types lag
+/**
+ * Vercel serverless filesystem is ephemeral and often not safe to rely on for artifacts.
+ * If persistence is disabled, we still generate artifacts but return them inline in the response.
+ */
+function isRunsPersistenceEnabled(): boolean {
+  if (process.env.DISABLE_RUNS_PERSIST === "1") return false;
+  if (process.env.FORCE_RUNS_PERSIST === "1") return true;
+  if (process.env.VERCEL === "1") return false;
+  return true;
+}
+
+// Defensive: supports writeRunFile being sync or async
 async function safeWriteRunFile(runId: string, name: string, data: string | Buffer) {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const fn: any = writeRunFile as any;
+  const fnUnknown: unknown = writeRunFile;
+  const fn = fnUnknown as (runId: string, name: string, data: unknown) => unknown;
   await Promise.resolve(fn(runId, name, data));
 }
 
@@ -155,8 +168,9 @@ export async function POST(req: Request) {
   const createdAt = nowIso();
 
   const baseMeta: RunMeta = { runId, createdAt };
+  const persistenceEnabled = isRunsPersistenceEnabled();
 
-  // Seed meta.json early so UI can always open something
+  // Seed meta.json early (best-effort). On Vercel this may be a no-op.
   try {
     const seedMeta: RunMeta = {
       ...baseMeta,
@@ -177,7 +191,7 @@ export async function POST(req: Request) {
   try {
     const body = (await req.json()) as RunRequest;
 
-    // --- Validate & parse spec YAML
+    // Validate & parse spec YAML
     const specObj = yaml.load(body.specYaml);
     const specParsed = SpecSchema.safeParse(specObj);
     if (!specParsed.success) {
@@ -188,7 +202,7 @@ export async function POST(req: Request) {
     }
     const spec = specParsed.data;
 
-    // --- Validate cases
+    // Validate cases
     if (!Array.isArray(body.cases) || body.cases.length === 0) {
       return NextResponse.json({ error: "Add at least one test case." }, { status: 400 });
     }
@@ -209,7 +223,7 @@ export async function POST(req: Request) {
       return parsed.data;
     });
 
-    // --- Validate selected models (must exist in MODEL_REGISTRY)
+    // Validate selected models
     const rawModelIds = normalizeModels(body.models);
     if (rawModelIds.length === 0) {
       return NextResponse.json({ error: "No models selected." }, { status: 400 });
@@ -219,17 +233,18 @@ export async function POST(req: Request) {
     try {
       rawModelIds.forEach(assertRegistryModelId);
       modelIds = rawModelIds;
-    } catch (e: any) {
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Invalid model id(s).";
       return NextResponse.json(
         {
-          error: e?.message ?? "Invalid model id(s). Select models from the registry list.",
+          error: msg || "Invalid model id(s). Select models from the registry list.",
           debug: { selected: rawModelIds, allowed: MODEL_REGISTRY.map((m) => m.id) },
         },
         { status: 400 }
       );
     }
 
-    // --- Settings
+    // Settings
     const concurrency = Math.min(Math.max(body.settings?.concurrency ?? 4, 1), 20);
     const limit = pLimit(concurrency);
 
@@ -240,22 +255,20 @@ export async function POST(req: Request) {
 
     const rates = validateRatecard(body.ratecard);
 
-    // --- verifier mode (accept legacy "tinker")
     const verifierMode: VerifierMode = normalizeVerifierMode(body.verifierMode);
 
-    // --- Auditor model — only validated if used
+    // Auditor model — only validated if used
     const rawAuditor = safeString(body.auditorModel).trim();
     const auditorModelId = rawAuditor || DEFAULT_AUDITOR_MODEL_ID;
 
     if (verifierMode === "llm_auditor") {
       try {
         assertRegistryModelId(auditorModelId);
-      } catch (e: any) {
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : `Invalid auditor model "${auditorModelId}".`;
         return NextResponse.json(
           {
-            error:
-              e?.message ??
-              `Invalid auditor model "${auditorModelId}". Select an auditor from the registry list.`,
+            error: msg,
             debug: { auditorModelId, allowed: MODEL_REGISTRY.map((m) => m.id) },
           },
           { status: 400 }
@@ -265,12 +278,12 @@ export async function POST(req: Request) {
 
     const auditorSystemPrompt = buildSystemPrompt(spec);
 
-    // --- Collectors
+    // Collectors
     const rows: ComplianceRow[] = [];
     const violationsJsonl: string[] = [];
     const jobErrors: JobError[] = [];
 
-    // --- Jobs
+    // Jobs
     const jobs: Array<Promise<void>> = [];
 
     for (const c of cases) {
@@ -303,11 +316,12 @@ export async function POST(req: Request) {
                 max_tokens,
               });
 
-              content = (gen as any).choices?.[0]?.message?.content ?? "";
-              genInTok = (gen as any).usage?.prompt_tokens ?? 0;
-              genOutTok = (gen as any).usage?.completion_tokens ?? 0;
-            } catch (e: any) {
-              const msg = safeString(e?.message) || "Generation failed.";
+              const gAny = gen as unknown as any;
+              content = gAny?.choices?.[0]?.message?.content ?? "";
+              genInTok = gAny?.usage?.prompt_tokens ?? 0;
+              genOutTok = gAny?.usage?.completion_tokens ?? 0;
+            } catch (e: unknown) {
+              const msg = safeString((e as any)?.message) || "Generation failed.";
               const status = extractHttpStatus(msg);
 
               jobErrors.push({
@@ -340,10 +354,11 @@ export async function POST(req: Request) {
                   max_tokens: 700,
                 });
 
-                auditInTok = (audit as any).usage?.prompt_tokens ?? 0;
-                auditOutTok = (audit as any).usage?.completion_tokens ?? 0;
+                const aAny = audit as unknown as any;
+                auditInTok = aAny?.usage?.prompt_tokens ?? 0;
+                auditOutTok = aAny?.usage?.completion_tokens ?? 0;
 
-                const raw = (audit as any).choices?.[0]?.message?.content ?? "{}";
+                const raw = aAny?.choices?.[0]?.message?.content ?? "{}";
 
                 try {
                   const parsed = JSON.parse(raw);
@@ -352,8 +367,8 @@ export async function POST(req: Request) {
                 } catch {
                   // If auditor returns non-JSON, keep local verdict.
                 }
-              } catch (e: any) {
-                const msg = safeString(e?.message) || "Audit failed.";
+              } catch (e: unknown) {
+                const msg = safeString((e as any)?.message) || "Audit failed.";
                 const status = extractHttpStatus(msg);
 
                 jobErrors.push({
@@ -449,7 +464,12 @@ export async function POST(req: Request) {
         warnings: ["All model-runs failed. No artifacts were generated."],
       };
 
-      await safeWriteRunFile(runId, "meta.json", JSON.stringify(meta, null, 2));
+      // best-effort
+      try {
+        await safeWriteRunFile(runId, "meta.json", JSON.stringify(meta, null, 2));
+      } catch {
+        // ignore (Vercel/demo mode)
+      }
 
       return NextResponse.json(
         {
@@ -498,15 +518,13 @@ export async function POST(req: Request) {
       rows: rows
         .slice()
         .sort((a, b) =>
-          a.case_id === b.case_id
-            ? a.model.localeCompare(b.model)
-            : a.case_id.localeCompare(b.case_id)
+          a.case_id === b.case_id ? a.model.localeCompare(b.model) : a.case_id.localeCompare(b.case_id)
         ),
       totals,
     };
 
-    // Persist artifacts
     const warnings: string[] = [];
+    const inline: InlineArtifacts = {};
 
     const artifactStatus = {
       html: { name: "report.html", available: false, createdAt: nowIso() } as ArtifactStatus,
@@ -516,43 +534,62 @@ export async function POST(req: Request) {
     };
 
     // violations.jsonl
+    let jsonlContent = "";
     try {
-      const jsonl = (violationsJsonl.length ? violationsJsonl.join("\n") : "") + "\n";
-      await safeWriteRunFile(runId, "violations.jsonl", jsonl);
+      jsonlContent = (violationsJsonl.length ? violationsJsonl.join("\n") : "") + "\n";
+      if (persistenceEnabled) {
+        await safeWriteRunFile(runId, "violations.jsonl", jsonlContent);
+      } else {
+        inline.jsonl = {
+          name: "violations.jsonl",
+          content: jsonlContent,
+          bytes: byteLenUtf8(jsonlContent),
+        };
+      }
       artifactStatus.jsonl.available = true;
-      artifactStatus.jsonl.bytes = byteLenUtf8(jsonl);
+      artifactStatus.jsonl.bytes = byteLenUtf8(jsonlContent);
       artifactStatus.jsonl.createdAt = nowIso();
-    } catch (e: any) {
+    } catch (e: unknown) {
       artifactStatus.jsonl.available = false;
-      artifactStatus.jsonl.error = safeString(e?.message) || "Failed to write violations.jsonl";
+      artifactStatus.jsonl.error = safeString((e as any)?.message) || "Failed to write violations.jsonl";
       warnings.push(`jsonl: ${artifactStatus.jsonl.error}`);
     }
 
     // compliance_table.csv
+    let csvContent = "";
     try {
-      const csv = toCSV(bundle.rows);
-      if (typeof csv !== "string") throw new Error("toCSV() must return a string.");
-      await safeWriteRunFile(runId, "compliance_table.csv", csv);
+      csvContent = toCSV(bundle.rows);
+      if (typeof csvContent !== "string") throw new Error("toCSV() must return a string.");
+      if (persistenceEnabled) {
+        await safeWriteRunFile(runId, "compliance_table.csv", csvContent);
+      } else {
+        inline.csv = { name: "compliance_table.csv", content: csvContent, bytes: byteLenUtf8(csvContent) };
+      }
       artifactStatus.csv.available = true;
-      artifactStatus.csv.bytes = byteLenUtf8(csv);
+      artifactStatus.csv.bytes = byteLenUtf8(csvContent);
       artifactStatus.csv.createdAt = nowIso();
-    } catch (e: any) {
+    } catch (e: unknown) {
       artifactStatus.csv.available = false;
-      artifactStatus.csv.error = safeString(e?.message) || "Failed to write compliance_table.csv";
+      artifactStatus.csv.error = safeString((e as any)?.message) || "Failed to write compliance_table.csv";
       warnings.push(`csv: ${artifactStatus.csv.error}`);
     }
 
-    // report.html
+    // report.html (primary artifact)
+    let htmlContent = "";
     try {
-      const html = toHTML(bundle);
-      if (typeof html !== "string") throw new Error("toHTML() must return a string.");
-      await safeWriteRunFile(runId, "report.html", html);
+      htmlContent = toHTML(bundle);
+      if (typeof htmlContent !== "string") throw new Error("toHTML() must return a string.");
+      if (persistenceEnabled) {
+        await safeWriteRunFile(runId, "report.html", htmlContent);
+      } else {
+        inline.html = { name: "report.html", content: htmlContent, bytes: byteLenUtf8(htmlContent) };
+      }
       artifactStatus.html.available = true;
-      artifactStatus.html.bytes = byteLenUtf8(html);
+      artifactStatus.html.bytes = byteLenUtf8(htmlContent);
       artifactStatus.html.createdAt = nowIso();
-    } catch (e: any) {
+    } catch (e: unknown) {
       artifactStatus.html.available = false;
-      artifactStatus.html.error = safeString(e?.message) || "Failed to write report.html";
+      artifactStatus.html.error = safeString((e as any)?.message) || "Failed to write report.html";
       warnings.push(`html: ${artifactStatus.html.error}`);
     }
 
@@ -561,17 +598,23 @@ export async function POST(req: Request) {
       const pdf = await toPDF(bundle);
       if (!Buffer.isBuffer(pdf)) throw new Error("toPDF() must resolve to a Buffer.");
       if (pdf.length === 0) throw new Error("toPDF() produced an empty Buffer.");
-      await safeWriteRunFile(runId, "report.pdf", pdf);
+
+      if (persistenceEnabled) {
+        await safeWriteRunFile(runId, "report.pdf", pdf);
+      } else {
+        inline.pdf = { name: "report.pdf", base64: pdf.toString("base64"), bytes: pdf.length };
+      }
+
       artifactStatus.pdf.available = true;
       artifactStatus.pdf.bytes = pdf.length;
       artifactStatus.pdf.createdAt = nowIso();
-    } catch (e: any) {
+    } catch (e: unknown) {
       artifactStatus.pdf.available = false;
-      artifactStatus.pdf.error = safeString(e?.message) || "PDF generation failed.";
+      artifactStatus.pdf.error = safeString((e as any)?.message) || "PDF generation failed.";
       warnings.push(`pdf: ${artifactStatus.pdf.error}`);
     }
 
-    // Final meta.json
+    // Final meta.json (best-effort; do NOT fail on Vercel)
     const finalMeta: RunMeta = {
       ...baseMeta,
       specId: spec.id,
@@ -591,23 +634,20 @@ export async function POST(req: Request) {
     };
 
     try {
-      await safeWriteRunFile(runId, "meta.json", JSON.stringify(finalMeta, null, 2));
-    } catch (e: any) {
-      return NextResponse.json(
-        {
-          error: "Run completed but failed to persist meta.json (run registry).",
-          runId,
-          details: safeString(e?.message) || "Failed to write meta.json",
-        },
-        { status: 500 }
-      );
+      if (persistenceEnabled) {
+        await safeWriteRunFile(runId, "meta.json", JSON.stringify(finalMeta, null, 2));
+      }
+    } catch (e: unknown) {
+      const msg = safeString((e as any)?.message) || "Failed to write meta.json";
+      warnings.push(`meta: ${msg}`);
+      // Do not throw; Vercel/demo mode can proceed without disk persistence.
     }
 
-    // If HTML failed => treat as server error
+    // If HTML failed => still return error (primary artifact)
     if (!artifactStatus.html.available) {
       return NextResponse.json(
         {
-          error: "Run completed but failed to persist report.html (primary artifact).",
+          error: "Run completed but failed to generate report.html (primary artifact).",
           runId,
           createdAt,
           specId: spec.id,
@@ -619,8 +659,8 @@ export async function POST(req: Request) {
       );
     }
 
-    // Success (even if PDF failed)
-    return NextResponse.json({
+    // Success response
+    const res: any = {
       runId,
       createdAt,
       specId: spec.id,
@@ -629,15 +669,25 @@ export async function POST(req: Request) {
       debug: {
         first_errors: jobErrors.slice(0, 5),
         artifacts: finalMeta.artifacts,
+        persistenceEnabled,
       },
-    });
-  } catch (e: any) {
-    // Fatal fallback
+    };
+
+    // On Vercel / when persistence disabled, return artifacts inline so users can still download.
+    if (!persistenceEnabled) {
+      res.artifacts_inline = inline;
+      res.notice =
+        "Runs persistence is disabled in this environment (e.g. Vercel). Artifacts are returned inline.";
+    }
+
+    return NextResponse.json(res);
+  } catch (e: unknown) {
+    // Fatal fallback (best-effort meta write)
     try {
       const fatalMeta: RunMeta = {
         ...baseMeta,
         fatal: true,
-        error: safeString(e?.message) || "Run failed",
+        error: safeString((e as any)?.message) || "Run failed",
         warnings: [],
         artifacts: {
           html: { name: "report.html", available: false, createdAt },
@@ -646,21 +696,23 @@ export async function POST(req: Request) {
           pdf: { name: "report.pdf", available: false, createdAt },
         },
       };
-      await safeWriteRunFile(runId, "meta.json", JSON.stringify(fatalMeta, null, 2));
+      if (isRunsPersistenceEnabled()) {
+        await safeWriteRunFile(runId, "meta.json", JSON.stringify(fatalMeta, null, 2));
+      }
     } catch {
       // ignore
     }
 
     return NextResponse.json(
       {
-        error: safeString(e?.message) || "Run failed",
+        error: safeString((e as any)?.message) || "Run failed",
         runId,
         details: [
           {
             case_id: "-",
             model: "-",
             stage: "unknown",
-            message: safeString(e?.message) || "Run failed",
+            message: safeString((e as any)?.message) || "Run failed",
           },
         ],
       },
