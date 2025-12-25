@@ -6,6 +6,17 @@ Treat policies like code. Test them across models. Ship with confidence.
 
 ---
 
+## 🚀 Live demo (Vercel)
+
+Demo: `https://modelspec-harness-wiqi.vercel.app/`
+
+**Important note about downloads on the Vercel demo:** Vercel functions run in a **stateless** environment, so the demo does **not** persist artifacts to disk.  
+Instead, the API returns all artifacts **inline** in the `artifacts_inline` payload (HTML, CSV, JSONL, PDF), and the UI downloads from that inline data.
+
+✅ **Local runs are unaffected** — when you run locally, artifacts are persisted under `./runs/<runId>/` and downloads work normally from disk.
+
+---
+
 ## 🌟 Key benefits
 
 ### For engineering teams
