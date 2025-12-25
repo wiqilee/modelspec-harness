@@ -10,31 +10,29 @@ const nextConfig = {
   },
 
   /**
-   * Ensure public/fonts/*.ttf are included in the serverless/standalone bundle
-   * (output file tracing), so runtime fs reads like:
-   *   process.cwd() + "/public/fonts/Inter-Regular.ttf"
-   * will work on Vercel / serverless.
+   * Vercel/Serverless: ensure public/fonts/*.ttf is included in the output file trace
+   * so fs reads like process.cwd() + "/public/fonts/Inter-Regular.ttf" work at runtime.
+   *
+   * Note: outputFileTracingIncludes requires Next 13.4+ and works with standalone output.
+   * Local dev is not affected.
    */
   experimental: {
     outputFileTracingIncludes: {
-      // Include fonts for all route handlers/pages
-      "/*": ["./public/fonts/**/*"],
+      // include for everything (route handlers + pages)
+      "/*": ["public/fonts/**/*.ttf", "public/fonts/**/*.otf"],
     },
   },
 
   webpack: (config, { isServer }) => {
     if (isServer) {
       // Prevent pdfkit/fontkit from being bundled by Next.js.
-      // They must run as native Node modules at runtime.
+      // Keep them as runtime Node externals.
       config.externals = config.externals || [];
-
-      // Keep existing externals behavior and add ours.
       config.externals.push({
         pdfkit: "commonjs pdfkit",
         fontkit: "commonjs fontkit",
       });
     }
-
     return config;
   },
 };

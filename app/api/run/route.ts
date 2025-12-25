@@ -75,10 +75,10 @@ type RunMeta = {
 };
 
 type InlineArtifacts = {
-  html?: { name: string; content: string; bytes: number };
-  csv?: { name: string; content: string; bytes: number };
-  jsonl?: { name: string; content: string; bytes: number };
-  pdf?: { name: string; base64: string; bytes: number };
+  html: { name: string; content: string; bytes: number } | null;
+  csv: { name: string; content: string; bytes: number } | null;
+  jsonl: { name: string; content: string; bytes: number } | null;
+  pdf: { name: string; base64: string; bytes: number } | null;
 };
 
 function safeString(x: unknown) {
@@ -139,8 +139,9 @@ function envDiagnostics() {
 }
 
 /**
- * Vercel serverless filesystem is ephemeral and often not safe to rely on for artifacts.
- * If persistence is disabled, we still generate artifacts but return them inline in the response.
+ * Persistence rules:
+ * - Local/default: persist artifacts via writeRunFile
+ * - Vercel (or DISABLE_RUNS_PERSIST=1): do NOT rely on FS; always return artifacts_inline
  */
 function isRunsPersistenceEnabled(): boolean {
   if (process.env.DISABLE_RUNS_PERSIST === "1") return false;
@@ -170,36 +171,43 @@ export async function POST(req: Request) {
   const baseMeta: RunMeta = { runId, createdAt };
   const persistenceEnabled = isRunsPersistenceEnabled();
 
-  // Always define inline collector early so even error paths can include it on Vercel.
-  const inline: InlineArtifacts = {};
-  const vercelInlineEnabled = !persistenceEnabled;
+  // Always return artifacts_inline when persistence is off (Vercel).
+  // Keep a stable shape so the UI never has to guess keys.
+  const artifacts_inline: InlineArtifacts = {
+    html: null,
+    csv: null,
+    jsonl: null,
+    pdf: null,
+  };
 
-  const withInline = (payload: any) => {
-    if (!vercelInlineEnabled) return payload;
+  const attachInline = (payload: any) => {
+    if (persistenceEnabled) return payload;
     return {
       ...payload,
-      artifacts_inline: inline, // always present on Vercel, even if empty
+      artifacts_inline,
       notice:
-        "Runs persistence is disabled in this environment (e.g. Vercel). Artifacts are returned inline when available.",
+        "Runs persistence is disabled in this environment (e.g. Vercel). Artifacts are returned inline.",
     };
   };
 
   // Seed meta.json early (best-effort). On Vercel this may be a no-op.
-  try {
-    const seedMeta: RunMeta = {
-      ...baseMeta,
-      artifacts: {
-        html: { name: "report.html", available: false, createdAt },
-        csv: { name: "compliance_table.csv", available: false, createdAt },
-        jsonl: { name: "violations.jsonl", available: false, createdAt },
-        pdf: { name: "report.pdf", available: false, createdAt },
-      },
-      warnings: [],
-      jobErrors: [],
-    };
-    await safeWriteRunFile(runId, "meta.json", JSON.stringify(seedMeta, null, 2));
-  } catch {
-    // ignore
+  if (persistenceEnabled) {
+    try {
+      const seedMeta: RunMeta = {
+        ...baseMeta,
+        artifacts: {
+          html: { name: "report.html", available: false, createdAt },
+          csv: { name: "compliance_table.csv", available: false, createdAt },
+          jsonl: { name: "violations.jsonl", available: false, createdAt },
+          pdf: { name: "report.pdf", available: false, createdAt },
+        },
+        warnings: [],
+        jobErrors: [],
+      };
+      await safeWriteRunFile(runId, "meta.json", JSON.stringify(seedMeta, null, 2));
+    } catch {
+      // ignore
+    }
   }
 
   try {
@@ -210,7 +218,7 @@ export async function POST(req: Request) {
     const specParsed = SpecSchema.safeParse(specObj);
     if (!specParsed.success) {
       return NextResponse.json(
-        withInline({ error: "Invalid spec YAML.", details: specParsed.error.flatten() }),
+        attachInline({ error: "Invalid spec YAML.", details: specParsed.error.flatten() }),
         { status: 400 }
       );
     }
@@ -218,7 +226,9 @@ export async function POST(req: Request) {
 
     // Validate cases
     if (!Array.isArray(body.cases) || body.cases.length === 0) {
-      return NextResponse.json(withInline({ error: "Add at least one test case." }), { status: 400 });
+      return NextResponse.json(attachInline({ error: "Add at least one test case." }), {
+        status: 400,
+      });
     }
 
     const cases = body.cases.map((c) => {
@@ -240,7 +250,7 @@ export async function POST(req: Request) {
     // Validate selected models
     const rawModelIds = normalizeModels(body.models);
     if (rawModelIds.length === 0) {
-      return NextResponse.json(withInline({ error: "No models selected." }), { status: 400 });
+      return NextResponse.json(attachInline({ error: "No models selected." }), { status: 400 });
     }
 
     let modelIds: string[] = [];
@@ -250,7 +260,7 @@ export async function POST(req: Request) {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Invalid model id(s).";
       return NextResponse.json(
-        withInline({
+        attachInline({
           error: msg || "Invalid model id(s). Select models from the registry list.",
           debug: { selected: rawModelIds, allowed: MODEL_REGISTRY.map((m) => m.id) },
         }),
@@ -264,11 +274,9 @@ export async function POST(req: Request) {
 
     const temperature =
       typeof body.settings?.temperature === "number" ? body.settings.temperature : 0.2;
-    const max_tokens =
-      typeof body.settings?.max_tokens === "number" ? body.settings.max_tokens : 512;
+    const max_tokens = typeof body.settings?.max_tokens === "number" ? body.settings.max_tokens : 512;
 
     const rates = validateRatecard(body.ratecard);
-
     const verifierMode: VerifierMode = normalizeVerifierMode(body.verifierMode);
 
     // Auditor model — only validated if used
@@ -281,7 +289,7 @@ export async function POST(req: Request) {
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : `Invalid auditor model "${auditorModelId}".`;
         return NextResponse.json(
-          withInline({
+          attachInline({
             error: msg,
             debug: { auditorModelId, allowed: MODEL_REGISTRY.map((m) => m.id) },
           }),
@@ -320,9 +328,7 @@ export async function POST(req: Request) {
                 messages: [
                   {
                     role: "system",
-                    content: c.context?.trim()
-                      ? c.context.trim()
-                      : "You are a helpful assistant.",
+                    content: c.context?.trim() ? c.context.trim() : "You are a helpful assistant.",
                   },
                   { role: "user", content: c.task },
                 ],
@@ -478,15 +484,16 @@ export async function POST(req: Request) {
         warnings: ["All model-runs failed. No artifacts were generated."],
       };
 
-      // best-effort
-      try {
-        await safeWriteRunFile(runId, "meta.json", JSON.stringify(meta, null, 2));
-      } catch {
-        // ignore (Vercel/demo mode)
+      if (persistenceEnabled) {
+        try {
+          await safeWriteRunFile(runId, "meta.json", JSON.stringify(meta, null, 2));
+        } catch {
+          // ignore
+        }
       }
 
       return NextResponse.json(
-        withInline({
+        attachInline({
           error: "All model-runs failed.",
           hint:
             "Common causes: missing/invalid provider API keys, unsupported model name, base URL mismatch, quota/credit limits, or network/timeout.",
@@ -499,10 +506,7 @@ export async function POST(req: Request) {
     }
 
     // Totals
-    const byModelMap = new Map<
-      string,
-      { total: number; pass: number; latencySum: number; costSum: number }
-    >();
+    const byModelMap = new Map<string, { total: number; pass: number; latencySum: number; costSum: number }>();
 
     for (const r of rows) {
       const cur = byModelMap.get(r.model) ?? { total: 0, pass: 0, latencySum: 0, costSum: 0 };
@@ -546,28 +550,30 @@ export async function POST(req: Request) {
       pdf: { name: "report.pdf", available: false, createdAt: nowIso() } as ArtifactStatus,
     };
 
+    // -------- ALWAYS GENERATE ARTIFACTS IN-MEMORY FIRST (for Vercel inline) --------
+
     // violations.jsonl
     let jsonlContent = "";
     try {
       jsonlContent = (violationsJsonl.length ? violationsJsonl.join("\n") : "") + "\n";
+      artifacts_inline.jsonl = {
+        name: "violations.jsonl",
+        content: jsonlContent,
+        bytes: byteLenUtf8(jsonlContent),
+      };
+
+      artifactStatus.jsonl.available = true;
+      artifactStatus.jsonl.bytes = artifacts_inline.jsonl.bytes;
+      artifactStatus.jsonl.createdAt = nowIso();
 
       if (persistenceEnabled) {
         await safeWriteRunFile(runId, "violations.jsonl", jsonlContent);
-      } else {
-        inline.jsonl = {
-          name: "violations.jsonl",
-          content: jsonlContent,
-          bytes: byteLenUtf8(jsonlContent),
-        };
       }
-
-      artifactStatus.jsonl.available = true;
-      artifactStatus.jsonl.bytes = byteLenUtf8(jsonlContent);
-      artifactStatus.jsonl.createdAt = nowIso();
     } catch (e: unknown) {
+      artifacts_inline.jsonl = null;
       artifactStatus.jsonl.available = false;
       artifactStatus.jsonl.error =
-        safeString((e as any)?.message) || "Failed to write violations.jsonl";
+        safeString((e as any)?.message) || "Failed to generate/write violations.jsonl";
       warnings.push(`jsonl: ${artifactStatus.jsonl.error}`);
     }
 
@@ -577,23 +583,24 @@ export async function POST(req: Request) {
       csvContent = toCSV(bundle.rows);
       if (typeof csvContent !== "string") throw new Error("toCSV() must return a string.");
 
-      if (persistenceEnabled) {
-        await safeWriteRunFile(runId, "compliance_table.csv", csvContent);
-      } else {
-        inline.csv = {
-          name: "compliance_table.csv",
-          content: csvContent,
-          bytes: byteLenUtf8(csvContent),
-        };
-      }
+      artifacts_inline.csv = {
+        name: "compliance_table.csv",
+        content: csvContent,
+        bytes: byteLenUtf8(csvContent),
+      };
 
       artifactStatus.csv.available = true;
-      artifactStatus.csv.bytes = byteLenUtf8(csvContent);
+      artifactStatus.csv.bytes = artifacts_inline.csv.bytes;
       artifactStatus.csv.createdAt = nowIso();
+
+      if (persistenceEnabled) {
+        await safeWriteRunFile(runId, "compliance_table.csv", csvContent);
+      }
     } catch (e: unknown) {
+      artifacts_inline.csv = null;
       artifactStatus.csv.available = false;
       artifactStatus.csv.error =
-        safeString((e as any)?.message) || "Failed to write compliance_table.csv";
+        safeString((e as any)?.message) || "Failed to generate/write compliance_table.csv";
       warnings.push(`csv: ${artifactStatus.csv.error}`);
     }
 
@@ -603,22 +610,23 @@ export async function POST(req: Request) {
       htmlContent = toHTML(bundle);
       if (typeof htmlContent !== "string") throw new Error("toHTML() must return a string.");
 
-      if (persistenceEnabled) {
-        await safeWriteRunFile(runId, "report.html", htmlContent);
-      } else {
-        inline.html = {
-          name: "report.html",
-          content: htmlContent,
-          bytes: byteLenUtf8(htmlContent),
-        };
-      }
+      artifacts_inline.html = {
+        name: "report.html",
+        content: htmlContent,
+        bytes: byteLenUtf8(htmlContent),
+      };
 
       artifactStatus.html.available = true;
-      artifactStatus.html.bytes = byteLenUtf8(htmlContent);
+      artifactStatus.html.bytes = artifacts_inline.html.bytes;
       artifactStatus.html.createdAt = nowIso();
+
+      if (persistenceEnabled) {
+        await safeWriteRunFile(runId, "report.html", htmlContent);
+      }
     } catch (e: unknown) {
+      artifacts_inline.html = null;
       artifactStatus.html.available = false;
-      artifactStatus.html.error = safeString((e as any)?.message) || "Failed to write report.html";
+      artifactStatus.html.error = safeString((e as any)?.message) || "Failed to generate/write report.html";
       warnings.push(`html: ${artifactStatus.html.error}`);
     }
 
@@ -628,16 +636,21 @@ export async function POST(req: Request) {
       if (!Buffer.isBuffer(pdf)) throw new Error("toPDF() must resolve to a Buffer.");
       if (pdf.length === 0) throw new Error("toPDF() produced an empty Buffer.");
 
-      if (persistenceEnabled) {
-        await safeWriteRunFile(runId, "report.pdf", pdf);
-      } else {
-        inline.pdf = { name: "report.pdf", base64: pdf.toString("base64"), bytes: pdf.length };
-      }
+      artifacts_inline.pdf = {
+        name: "report.pdf",
+        base64: pdf.toString("base64"),
+        bytes: pdf.length,
+      };
 
       artifactStatus.pdf.available = true;
       artifactStatus.pdf.bytes = pdf.length;
       artifactStatus.pdf.createdAt = nowIso();
+
+      if (persistenceEnabled) {
+        await safeWriteRunFile(runId, "report.pdf", pdf);
+      }
     } catch (e: unknown) {
+      artifacts_inline.pdf = null;
       artifactStatus.pdf.available = false;
       artifactStatus.pdf.error = safeString((e as any)?.message) || "PDF generation failed.";
       warnings.push(`pdf: ${artifactStatus.pdf.error}`);
@@ -662,21 +675,20 @@ export async function POST(req: Request) {
       warnings,
     };
 
-    try {
-      if (persistenceEnabled) {
+    if (persistenceEnabled) {
+      try {
         await safeWriteRunFile(runId, "meta.json", JSON.stringify(finalMeta, null, 2));
+      } catch (e: unknown) {
+        const msg = safeString((e as any)?.message) || "Failed to write meta.json";
+        warnings.push(`meta: ${msg}`);
       }
-    } catch (e: unknown) {
-      const msg = safeString((e as any)?.message) || "Failed to write meta.json";
-      warnings.push(`meta: ${msg}`);
-      // Do not throw; Vercel/demo mode can proceed without disk persistence.
     }
 
     // If HTML failed => still return error (primary artifact)
-    // On Vercel, still include artifacts_inline (maybe csv/jsonl/pdf exist).
+    // On Vercel, artifacts_inline will still be present (maybe csv/jsonl/pdf exist).
     if (!artifactStatus.html.available) {
       return NextResponse.json(
-        withInline({
+        attachInline({
           error: "Run completed but failed to generate report.html (primary artifact).",
           runId,
           createdAt,
@@ -690,27 +702,20 @@ export async function POST(req: Request) {
     }
 
     // Success response
-    const res: any = {
-      runId,
-      createdAt,
-      specId: spec.id,
-      totals,
-      warnings,
-      debug: {
-        first_errors: jobErrors.slice(0, 5),
-        artifacts: finalMeta.artifacts,
-        persistenceEnabled,
-      },
-    };
-
-    // On Vercel / when persistence disabled, always return artifacts_inline (even if empty).
-    if (vercelInlineEnabled) {
-      res.artifacts_inline = inline;
-      res.notice =
-        "Runs persistence is disabled in this environment (e.g. Vercel). Artifacts are returned inline when available.";
-    }
-
-    return NextResponse.json(res);
+    return NextResponse.json(
+      attachInline({
+        runId,
+        createdAt,
+        specId: spec.id,
+        totals,
+        warnings,
+        debug: {
+          first_errors: jobErrors.slice(0, 5),
+          artifacts: finalMeta.artifacts,
+          persistenceEnabled,
+        },
+      })
+    );
   } catch (e: unknown) {
     // Fatal fallback (best-effort meta write)
     try {
@@ -726,7 +731,7 @@ export async function POST(req: Request) {
           pdf: { name: "report.pdf", available: false, createdAt },
         },
       };
-      if (isRunsPersistenceEnabled()) {
+      if (persistenceEnabled) {
         await safeWriteRunFile(runId, "meta.json", JSON.stringify(fatalMeta, null, 2));
       }
     } catch {
@@ -734,7 +739,7 @@ export async function POST(req: Request) {
     }
 
     return NextResponse.json(
-      withInline({
+      attachInline({
         error: safeString((e as any)?.message) || "Run failed",
         runId,
         details: [
