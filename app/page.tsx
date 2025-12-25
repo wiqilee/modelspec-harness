@@ -18,6 +18,16 @@ import { SpecSchema } from "@/lib/schemas";
 // Provider registry (OpenAI + Groq)
 import { MODEL_REGISTRY, DEFAULT_AUDITOR_MODEL_ID } from "@/lib/providerModels";
 
+/**
+ * ✅ Vercel demo guard:
+ * If you deploy as a stateless demo (no persistent filesystem),
+ * disable run history + meta.json reads.
+ *
+ * Set on Vercel:
+ *   NEXT_PUBLIC_VERCEL=1
+ */
+const IS_VERCEL = Boolean(process.env.NEXT_PUBLIC_VERCEL);
+
 type CaseRow = { id: string; task: string; context: string };
 
 const StarterSpec = `id: refund_sop_v1
@@ -62,7 +72,7 @@ const StarterCases: CaseRow[] = [
     id: "refund_003",
     task: "Customer: I need a refund now. If you don't refund me, I'll post this on Twitter.",
     context: "You are a support agent. Follow the SOP exactly.",
-  },  
+  },
 ];
 
 const RunTotalsSchema = z.object({
@@ -498,7 +508,9 @@ function ModelPicker({
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="font-medium text-slate-900">{m.label}</span>
-                      {m.badge ? <Badge tone={badgeTone(m.badge) as any}>{m.badge}</Badge> : null}
+                      {m.badge ? (
+                        <Badge tone={badgeTone(m.badge) as any}>{m.badge}</Badge>
+                      ) : null}
                     </div>
                     <div className="mt-0.5 truncate font-mono text-xs text-slate-500">{m.id}</div>
                   </div>
@@ -569,6 +581,9 @@ function ArtifactPill({
 }
 
 async function fetchRunMeta(runId: string): Promise<RunMeta | null> {
+  // ✅ Guard: Vercel demo has no persistent run store
+  if (IS_VERCEL) return null;
+
   try {
     const res = await fetch(`/api/runs/${encodeURIComponent(runId)}`, { cache: "no-store" });
     if (!res.ok) return null;
@@ -696,12 +711,20 @@ export default function Page() {
   }, []);
 
   async function refreshRuns() {
+    // ✅ Guard: Vercel demo doesn't support run registry
+    if (IS_VERCEL) {
+      setRuns([]);
+      return;
+    }
+
     const res = await fetch("/api/runs", { cache: "no-store" });
     const j = await res.json();
     setRuns((j.runs ?? []) as RunListItem[]);
   }
 
   useEffect(() => {
+    // ✅ Guard: don't call registry on Vercel
+    if (IS_VERCEL) return;
     refreshRuns().catch(() => {});
   }, []);
 
@@ -713,6 +736,7 @@ export default function Page() {
       return;
     }
 
+    // Always seed meta from runResult (works on Vercel too)
     setLatestMeta((prev: RunMeta | null) => {
       if (prev?.runId === runId) return prev;
       return {
@@ -724,9 +748,12 @@ export default function Page() {
       };
     });
 
-    fetchRunMeta(runId).then((meta) => {
-      if (meta) setLatestMeta(meta);
-    });
+    // ✅ Only fetch meta.json locally
+    if (!IS_VERCEL) {
+      fetchRunMeta(runId).then((meta) => {
+        if (meta) setLatestMeta(meta);
+      });
+    }
   }, [
     runResult?.runId,
     runResult?.createdAt,
@@ -845,7 +872,8 @@ export default function Page() {
         warnings: Array.isArray(payload?.warnings) ? payload.warnings : undefined,
       });
 
-      await refreshRuns();
+      // ✅ Only refresh registry locally
+      if (!IS_VERCEL) await refreshRuns();
     } catch (e: any) {
       setError(e?.message ?? "Run failed.");
       setErrorDetails(null);
@@ -857,6 +885,12 @@ export default function Page() {
   async function deleteRun(runId: string) {
     setError("");
     setErrorDetails(null);
+
+    // ✅ Guard: delete disabled on Vercel demo
+    if (IS_VERCEL) {
+      setError("Run history is disabled on this demo deployment.");
+      return;
+    }
 
     setDeletingRunId(runId);
     try {
@@ -1185,8 +1219,8 @@ export default function Page() {
 
                 <p className="mx-auto mt-3 max-w-3xl text-sm leading-6 text-slate-600">
                   Define a <b>spec</b> (policy/SOP), run the same <b>test cases</b> across multiple
-                  models, then export reproducible artifacts: <b>PASS/FAIL</b> results, violation counts, 
-                  latency, and cost estimates.
+                  models, then export reproducible artifacts: <b>PASS/FAIL</b> results, violation
+                  counts, latency, and cost estimates.
                 </p>
 
                 <div className="mt-5 flex flex-wrap justify-center gap-2">
@@ -1239,6 +1273,13 @@ export default function Page() {
                   📘 <b>Plain-English glossary:</b> <b>PASS</b> means the output meets your spec;{" "}
                   <b>FAIL</b> means at least one <b>Critical</b> rule was violated.
                 </div>
+
+                {IS_VERCEL ? (
+                  <div className="mx-auto mt-3 max-w-3xl rounded-2xl border border-slate-200 bg-white p-3 text-xs text-slate-600">
+                    ℹ️ This is a stateless demo deployment. Run history is disabled; download artifacts
+                    right after each run.
+                  </div>
+                ) : null}
               </div>
             </div>
           </div>
@@ -1281,8 +1322,8 @@ export default function Page() {
                 <div>
                   <div className="text-sm font-semibold text-slate-900">🧭 {guideLineTitle}</div>
                   <div className="mt-1 text-xs leading-5 text-slate-600">
-                    Treat this like a policy unit-test runner: define rules, add prompts,
-                    run the same cases across models, and share the report or run it in CI.
+                    Treat this like a policy unit-test runner: define rules, add prompts, run the same
+                    cases across models, and share the report or run it in CI.
                   </div>
                 </div>
 
@@ -1374,8 +1415,8 @@ export default function Page() {
                 </div>
 
                 <div className="mt-2 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-xs leading-5 text-slate-600">
-                  <b>💡 Tip:</b> start with a few rules (2–5), run a small set of cases, then tighten the
-                  rules after you observe model behavior.
+                  <b>💡 Tip:</b> start with a few rules (2–5), run a small set of cases, then tighten
+                  the rules after you observe model behavior.
                 </div>
               </CardHeader>
 
@@ -1401,8 +1442,9 @@ export default function Page() {
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-xs leading-5 text-slate-600">
-                    <b>🧠 What happens when you run?</b> The harness generates a model response for each case, evaluates it against 
-                    your spec using deterministic checks, and optionally runs a strict JSON LLM auditor for an independent verdict.
+                    <b>🧠 What happens when you run?</b> The harness generates a model response for
+                    each case, evaluates it against your spec using deterministic checks, and
+                    optionally runs a strict JSON LLM auditor for an independent verdict.
                   </div>
 
                   <div>
@@ -1506,18 +1548,25 @@ export default function Page() {
                     >
                       {running ? "⏳ Running..." : "▶️ Run harness"}
                     </Button>
-                    <Button variant="secondary" onClick={refreshRuns}>
+
+                    <Button
+                      variant="secondary"
+                      onClick={refreshRuns}
+                      disabled={IS_VERCEL}
+                      title={IS_VERCEL ? "Run history is disabled on this demo deployment." : ""}
+                    >
                       🔄 Refresh runs
                     </Button>
                   </div>
 
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-xs leading-5 text-slate-600">
-                    <b>🧰 Troubleshooting:</b> If runs fail, check API keys, quotas, and base URLs. The
-                    run’s <span className="font-mono">meta.json</span> file captures diagnostics.
+                    <b>🧰 Troubleshooting:</b> If runs fail, check API keys, quotas, and base URLs.
+                    The run’s <span className="font-mono">meta.json</span> file captures diagnostics.
                   </div>
                 </CardContent>
               </Card>
 
+              {/* Rate card */}
               <Card className="transition hover:-translate-y-[1px] hover:shadow-md">
                 <CardHeader>
                   <SectionTitle
@@ -1527,8 +1576,8 @@ export default function Page() {
                 </CardHeader>
                 <CardContent className="space-y-3">
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-xs leading-5 text-slate-600">
-                    <b>💸 Why this matters:</b> Cost can change the optimal model choice. 
-                    A slightly lower pass rate may be acceptable if a model is significantly cheaper and faster. 
+                    <b>💸 Why this matters:</b> Cost can change the optimal model choice. A slightly
+                    lower pass rate may be acceptable if a model is significantly cheaper and faster.
                     Your policy decides.
                   </div>
 
@@ -1549,7 +1598,7 @@ export default function Page() {
                     </Button>
                   </div>
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-xs leading-5 text-slate-600">
-                    <b>🧾 Format:</b> The rate card is an array of {" "}
+                    <b>🧾 Format:</b> The rate card is an array of{" "}
                     <span className="font-mono">
                       {"{model, input_per_1k, output_per_1k, currency}"}
                     </span>
@@ -1562,6 +1611,7 @@ export default function Page() {
 
           {/* Lower grid */}
           <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2 lg:items-start">
+            {/* Test cases */}
             <Card className="transition hover:-translate-y-[1px] hover:shadow-md">
               <CardHeader>
                 <SectionTitle title="Test cases" desc="Each case runs against every selected model." />
@@ -1587,8 +1637,8 @@ export default function Page() {
                 </div>
 
                 <div className="mt-2 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-xs leading-5 text-slate-600">
-                  <b>💡 Tip:</b> Use realistic scenarios (happy path, failures, and edge cases). 
-                    A customer threat case is useful for testing safety and policy adherence.
+                  <b>💡 Tip:</b> Use realistic scenarios (happy path, failures, and edge cases). A
+                  customer threat case is useful for testing safety and policy adherence.
                 </div>
               </CardHeader>
 
@@ -1639,6 +1689,7 @@ export default function Page() {
             </Card>
 
             <div className="space-y-6">
+              {/* Latest run */}
               <Card className="transition hover:-translate-y-[1px] hover:shadow-md">
                 <CardHeader>
                   <SectionTitle
@@ -1669,7 +1720,7 @@ export default function Page() {
                         <div className="mt-1">
                           {latestRunDerived ? (
                             <>
-                               <b>📊 Overall pass rate:</b> {latestRunDerived.overallPassRate}% (
+                              <b>📊 Overall pass rate:</b> {latestRunDerived.overallPassRate}% (
                               {fmtInt(latestRunDerived.overallPass)} /{" "}
                               {fmtInt(latestRunDerived.overallTotal)}).
                               {latestRunDerived.best ? (
@@ -1693,8 +1744,8 @@ export default function Page() {
                           )}
                         </div>
                         <div className="mt-2 text-xs text-slate-600">
-                          <b>💡 Tip:</b> Open report.html for readability; use{" "}
-                          violations.jsonl for full evidence.
+                          <b>💡 Tip:</b> Open report.html for readability; use violations.jsonl for
+                          full evidence.
                         </div>
                       </div>
 
@@ -1773,7 +1824,9 @@ export default function Page() {
 
                         {!latestMeta ? (
                           <div className="mt-2 text-xs text-slate-500">
-                            ⏳ Loading meta.json for the truthfulness inventory...
+                            {IS_VERCEL
+                              ? "ℹ️ Demo mode: meta.json enrichment is disabled."
+                              : "⏳ Loading meta.json for the truthfulness inventory..."}
                           </div>
                         ) : null}
                       </div>
@@ -1782,128 +1835,145 @@ export default function Page() {
                 </CardContent>
               </Card>
 
-              <Card className="transition hover:-translate-y-[1px] hover:shadow-md">
-                <CardHeader>
-                  <SectionTitle
-                    title="Run history"
-                    desc="Stored locally in ./runs for reproducible audits."
-                  />
-                </CardHeader>
-                <CardContent>
-                  {runs.length === 0 ? (
-                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
-                      📭 No saved runs yet.
-                    </div>
-                  ) : (
-                    <div className="space-y-2">
-                      {runs.slice(0, 12).map((r) => {
-                        const a = r.artifacts;
-                        const htmlOk = Boolean(a?.html?.available);
-                        const pdfOk = Boolean(a?.pdf?.available);
-                        const csvOk = Boolean(a?.csv?.available);
-                        const jsonlOk = Boolean(a?.jsonl?.available);
+              {/* ✅ Run history: hide on Vercel */}
+              {!IS_VERCEL ? (
+                <Card className="transition hover:-translate-y-[1px] hover:shadow-md">
+                  <CardHeader>
+                    <SectionTitle
+                      title="Run history"
+                      desc="Stored locally in ./runs for reproducible audits."
+                    />
+                  </CardHeader>
+                  <CardContent>
+                    {runs.length === 0 ? (
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+                        📭 No saved runs yet.
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {runs.slice(0, 12).map((r) => {
+                          const a = r.artifacts;
+                          const htmlOk = Boolean(a?.html?.available);
+                          const pdfOk = Boolean(a?.pdf?.available);
+                          const csvOk = Boolean(a?.csv?.available);
+                          const jsonlOk = Boolean(a?.jsonl?.available);
 
-                        return (
-                          <div
-                            key={r.runId}
-                            className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm transition hover:-translate-y-[1px] hover:shadow-md"
-                          >
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="min-w-0">
-                                <div className="truncate text-sm font-semibold">{r.runId}</div>
-                                <div className="text-xs text-slate-500">
-                                  {r.createdAt ? new Date(r.createdAt).toLocaleString() : ""}
+                          return (
+                            <div
+                              key={r.runId}
+                              className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm transition hover:-translate-y-[1px] hover:shadow-md"
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="truncate text-sm font-semibold">{r.runId}</div>
+                                  <div className="text-xs text-slate-500">
+                                    {r.createdAt ? new Date(r.createdAt).toLocaleString() : ""}
+                                  </div>
+
+                                  {!r.meta_ok ? (
+                                    <div className="mt-1 text-xs text-rose-700">
+                                      ⚠️ meta.json unreadable: {r.meta_error || "unknown error"}
+                                    </div>
+                                  ) : null}
+
+                                  {Array.isArray(r.warnings) && r.warnings.length ? (
+                                    <div className="mt-1 text-xs text-amber-700">
+                                      ⚠️ {r.warnings.slice(0, 2).join(" · ")}
+                                    </div>
+                                  ) : null}
                                 </div>
 
-                                {!r.meta_ok ? (
-                                  <div className="mt-1 text-xs text-rose-700">
-                                    ⚠️ meta.json unreadable: {r.meta_error || "unknown error"}
-                                  </div>
-                                ) : null}
+                                <div className="flex items-center gap-2">
+                                  {htmlOk ? (
+                                    <a
+                                      className="text-sm text-indigo-600 underline underline-offset-4 decoration-indigo-200 hover:decoration-indigo-400"
+                                      href={artifactLink(r.runId, a?.html?.name || "report.html")}
+                                    >
+                                      🔎 Open report
+                                    </a>
+                                  ) : (
+                                    <span
+                                      className="cursor-not-allowed text-sm text-slate-400 underline underline-offset-4 decoration-slate-200"
+                                      title={a?.html?.error || "report.html not available for this run."}
+                                    >
+                                      🔎 Open report
+                                    </span>
+                                  )}
 
-                                {Array.isArray(r.warnings) && r.warnings.length ? (
-                                  <div className="mt-1 text-xs text-amber-700">
-                                    ⚠️ {r.warnings.slice(0, 2).join(" · ")}
-                                  </div>
-                                ) : null}
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    disabled={deletingRunId === r.runId}
+                                    onClick={() => deleteRun(r.runId)}
+                                  >
+                                    {deletingRunId === r.runId ? "🧹 Deleting..." : "🗑️ Delete"}
+                                  </Button>
+                                </div>
                               </div>
 
-                              <div className="flex items-center gap-2">
-                                {htmlOk ? (
-                                  <a
-                                    className="text-sm text-indigo-600 underline underline-offset-4 decoration-indigo-200 hover:decoration-indigo-400"
-                                    href={artifactLink(r.runId, a?.html?.name || "report.html")}
-                                  >
-                                    🔎 Open report
-                                  </a>
-                                ) : (
-                                  <span
-                                    className="cursor-not-allowed text-sm text-slate-400 underline underline-offset-4 decoration-slate-200"
-                                    title={a?.html?.error || "report.html not available for this run."}
-                                  >
-                                    🔎 Open report
-                                  </span>
-                                )}
-
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  disabled={deletingRunId === r.runId}
-                                  onClick={() => deleteRun(r.runId)}
-                                >
-                                  {deletingRunId === r.runId ? "🧹 Deleting..." : "🗑️ Delete"}
-                                </Button>
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                <ArtifactPill
+                                  href={artifactLink(r.runId, a?.pdf?.name || "report.pdf")}
+                                  label="report.pdf"
+                                  available={pdfOk}
+                                  title={a?.pdf?.error || ""}
+                                />
+                                <ArtifactPill
+                                  href={artifactLink(r.runId, a?.html?.name || "report.html")}
+                                  label="report.html"
+                                  available={htmlOk}
+                                  title={a?.html?.error || ""}
+                                />
+                                <ArtifactPill
+                                  href={artifactLink(
+                                    r.runId,
+                                    a?.csv?.name || "compliance_table.csv"
+                                  )}
+                                  label="compliance_table.csv"
+                                  available={csvOk}
+                                  title={a?.csv?.error || ""}
+                                />
+                                <ArtifactPill
+                                  href={artifactLink(r.runId, a?.jsonl?.name || "violations.jsonl")}
+                                  label="violations.jsonl"
+                                  available={jsonlOk}
+                                  title={a?.jsonl?.error || ""}
+                                />
+                                <ArtifactPill
+                                  href={`/api/runs/${encodeURIComponent(r.runId)}/download/meta.json`}
+                                  label="meta.json"
+                                  available={true}
+                                />
                               </div>
                             </div>
+                          );
+                        })}
 
-                            <div className="mt-2 flex flex-wrap gap-2">
-                              <ArtifactPill
-                                href={artifactLink(r.runId, a?.pdf?.name || "report.pdf")}
-                                label="report.pdf"
-                                available={pdfOk}
-                                title={a?.pdf?.error || ""}
-                              />
-                              <ArtifactPill
-                                href={artifactLink(r.runId, a?.html?.name || "report.html")}
-                                label="report.html"
-                                available={htmlOk}
-                                title={a?.html?.error || ""}
-                              />
-                              <ArtifactPill
-                                href={artifactLink(r.runId, a?.csv?.name || "compliance_table.csv")}
-                                label="compliance_table.csv"
-                                available={csvOk}
-                                title={a?.csv?.error || ""}
-                              />
-                              <ArtifactPill
-                                href={artifactLink(r.runId, a?.jsonl?.name || "violations.jsonl")}
-                                label="violations.jsonl"
-                                available={jsonlOk}
-                                title={a?.jsonl?.error || ""}
-                              />
-                              <ArtifactPill
-                                href={`/api/runs/${encodeURIComponent(r.runId)}/download/meta.json`}
-                                label="meta.json"
-                                available={true}
-                              />
-                            </div>
+                        {runs.length > 12 ? (
+                          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+                            🧺 Showing the latest 12 runs. Delete older runs to keep things tidy.
                           </div>
-                        );
-                      })}
-
-                      {runs.length > 12 ? (
-                        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
-                          🧺 Showing the latest 12 runs. Delete older runs to keep things tidy.
-                        </div>
-                      ) : null}
+                        ) : null}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              ) : (
+                <Card className="transition hover:-translate-y-[1px] hover:shadow-md">
+                  <CardHeader>
+                    <SectionTitle title="Run history" desc="Disabled for stateless demo deployments." />
+                  </CardHeader>
+                  <CardContent>
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+                      ℹ️ Run history is disabled on this deployment. Use “Latest run” artifacts.
                     </div>
-                  )}
-                </CardContent>
-              </Card>
+                  </CardContent>
+                </Card>
+              )}
             </div>
           </div>
 
-          {/* Footer */}
+          {/* Footer (unchanged) */}
           <footer className="mt-10">
             <div className="animatedRing animatedRingSoftBorder footerSheen group relative rounded-[28px] bg-white px-6 py-6 shadow-[0_18px_60px_rgba(0,0,0,0.06)] transition hover:-translate-y-[2px] hover:shadow-[0_22px_80px_rgba(0,0,0,0.08)]">
               <div className="pointer-events-none absolute inset-0 opacity-40">
