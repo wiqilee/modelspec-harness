@@ -19,14 +19,17 @@ import { SpecSchema } from "@/lib/schemas";
 import { MODEL_REGISTRY, DEFAULT_AUDITOR_MODEL_ID } from "@/lib/providerModels";
 
 /**
- * ✅ Vercel demo guard:
- * If you deploy as a stateless demo (no persistent filesystem),
- * disable run history + meta.json reads.
+ * ✅ Vercel demo guard (AUTO):
+ * - Local: run history works (./runs)
+ * - Vercel: if /api/runs or /api/runs/:id returns HTML (non-JSON), we auto-switch to demo mode
  *
- * Set on Vercel:
+ * Optional explicit override:
  *   NEXT_PUBLIC_VERCEL=1
  */
-const IS_VERCEL = Boolean(process.env.NEXT_PUBLIC_VERCEL);
+const ENV_SAYS_VERCEL =
+  process.env.NEXT_PUBLIC_VERCEL === "1" ||
+  process.env.NEXT_PUBLIC_VERCEL === "true" ||
+  process.env.NEXT_PUBLIC_VERCEL === "yes";
 
 type CaseRow = { id: string; task: string; context: string };
 
@@ -169,6 +172,26 @@ function formatDetailLine(d: ErrorDetailItem): string {
   const right = d.message || "Unknown error.";
   const prefix = [left, mid].filter(Boolean).join(" - ");
   return prefix ? `${prefix}: ${right}` : right;
+}
+
+/**
+ * ✅ Safe JSON fetch:
+ * Prevents "Unexpected token '<'" when Vercel returns an HTML error page.
+ */
+async function safeFetchJson<T = any>(
+  url: string,
+  init?: RequestInit
+): Promise<{ ok: boolean; status: number; json: T | null; text: string; contentType: string }> {
+  const res = await fetch(url, init);
+  const contentType = res.headers.get("content-type") || "";
+
+  if (!contentType.includes("application/json")) {
+    const text = await res.text().catch(() => "");
+    return { ok: res.ok, status: res.status, json: null, text, contentType };
+  }
+
+  const json = (await res.json().catch(() => null)) as T | null;
+  return { ok: res.ok, status: res.status, json, text: "", contentType };
 }
 
 // ===== Model picker (locked: registry list only) =====
@@ -580,18 +603,31 @@ function ArtifactPill({
   );
 }
 
-async function fetchRunMeta(runId: string): Promise<RunMeta | null> {
-  // ✅ Guard: Vercel demo has no persistent run store
-  if (IS_VERCEL) return null;
+async function fetchRunMeta(
+  runId: string,
+  demoMode: boolean,
+  onDemoDetected: () => void
+): Promise<RunMeta | null> {
+  if (demoMode) return null;
 
   try {
-    const res = await fetch(`/api/runs/${encodeURIComponent(runId)}`, { cache: "no-store" });
-    if (!res.ok) return null;
-    const j = (await res.json().catch(() => null)) as any;
+    const out = await safeFetchJson<any>(`/api/runs/${encodeURIComponent(runId)}`, {
+      cache: "no-store",
+    });
+
+    // Non-JSON => likely hosted stateless / error page => enable demo mode
+    if (!out.json) {
+      onDemoDetected();
+      return null;
+    }
+
+    if (!out.ok) return null;
+
     // GET /api/runs/:runId returns: { ok: true, runId, meta }
-    if (j && j.meta && typeof j.meta === "object") return j.meta as RunMeta;
+    if (out.json && out.json.meta && typeof out.json.meta === "object") return out.json.meta as RunMeta;
     return null;
   } catch {
+    onDemoDetected();
     return null;
   }
 }
@@ -643,6 +679,13 @@ function NativeActionButton({
 // ===== Page =====
 
 export default function Page() {
+  // ✅ Auto demo mode:
+  // - Starts from env hint
+  // - If /api/runs or /api/runs/:id returns non-JSON/HTML, we auto-flip to demo mode
+  const [demoMode, setDemoMode] = useState<boolean>(ENV_SAYS_VERCEL);
+  const IS_VERCEL = demoMode;
+  const enableDemoMode = () => setDemoMode(true);
+
   const [specYaml, setSpecYaml] = useState<string>(StarterSpec);
   const [cases, setCases] = useState<CaseRow[]>(StarterCases);
 
@@ -711,21 +754,38 @@ export default function Page() {
   }, []);
 
   async function refreshRuns() {
-    // ✅ Guard: Vercel demo doesn't support run registry
     if (IS_VERCEL) {
       setRuns([]);
       return;
     }
 
-    const res = await fetch("/api/runs", { cache: "no-store" });
-    const j = await res.json();
-    setRuns((j.runs ?? []) as RunListItem[]);
+    try {
+      const out = await safeFetchJson<any>("/api/runs", { cache: "no-store" });
+
+      // Non-JSON => likely hosted stateless / error page => enable demo mode
+      if (!out.json) {
+        enableDemoMode();
+        setRuns([]);
+        return;
+      }
+
+      if (!out.ok) {
+        enableDemoMode();
+        setRuns([]);
+        return;
+      }
+
+      setRuns((out.json.runs ?? []) as RunListItem[]);
+    } catch {
+      enableDemoMode();
+      setRuns([]);
+    }
   }
 
   useEffect(() => {
-    // ✅ Guard: don't call registry on Vercel
-    if (IS_VERCEL) return;
+    // Try load runs; if hosted returns HTML, we'll flip to demo mode automatically.
     refreshRuns().catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Keep latest meta synced (so Latest run links never 404)
@@ -736,7 +796,7 @@ export default function Page() {
       return;
     }
 
-    // Always seed meta from runResult (works on Vercel too)
+    // Always seed meta from runResult (works on demo mode too)
     setLatestMeta((prev: RunMeta | null) => {
       if (prev?.runId === runId) return prev;
       return {
@@ -748,18 +808,17 @@ export default function Page() {
       };
     });
 
-    // ✅ Only fetch meta.json locally
-    if (!IS_VERCEL) {
-      fetchRunMeta(runId).then((meta) => {
-        if (meta) setLatestMeta(meta);
-      });
-    }
+    // Fetch meta.json only if not in demo mode (auto-detect can flip demo mode if needed)
+    fetchRunMeta(runId, IS_VERCEL, enableDemoMode).then((meta) => {
+      if (meta) setLatestMeta(meta);
+    });
   }, [
     runResult?.runId,
     runResult?.createdAt,
     runResult?.specId,
     runResult?.warnings,
     runResult?.artifacts,
+    IS_VERCEL,
   ]);
 
   function addCase() {
@@ -872,7 +931,7 @@ export default function Page() {
         warnings: Array.isArray(payload?.warnings) ? payload.warnings : undefined,
       });
 
-      // ✅ Only refresh registry locally
+      // Only refresh runs if not in demo mode (local)
       if (!IS_VERCEL) await refreshRuns();
     } catch (e: any) {
       setError(e?.message ?? "Run failed.");
@@ -886,7 +945,7 @@ export default function Page() {
     setError("");
     setErrorDetails(null);
 
-    // ✅ Guard: delete disabled on Vercel demo
+    // ✅ Guard: delete disabled on demo deployments
     if (IS_VERCEL) {
       setError("Run history is disabled on this demo deployment.");
       return;
@@ -1815,11 +1874,7 @@ export default function Page() {
                             available={latestAvailability.jsonl}
                             title={latestArtifacts?.jsonl?.error || ""}
                           />
-                          <ArtifactPill
-                            href={latestArtifactLinks?.meta || "#"}
-                            label="meta.json"
-                            available={true}
-                          />
+                          <ArtifactPill href={latestArtifactLinks?.meta || "#"} label="meta.json" available={true} />
                         </div>
 
                         {!latestMeta ? (
@@ -1835,7 +1890,7 @@ export default function Page() {
                 </CardContent>
               </Card>
 
-              {/* ✅ Run history: hide on Vercel */}
+              {/* ✅ Run history: hide on demo mode */}
               {!IS_VERCEL ? (
                 <Card className="transition hover:-translate-y-[1px] hover:shadow-md">
                   <CardHeader>
@@ -1925,10 +1980,7 @@ export default function Page() {
                                   title={a?.html?.error || ""}
                                 />
                                 <ArtifactPill
-                                  href={artifactLink(
-                                    r.runId,
-                                    a?.csv?.name || "compliance_table.csv"
-                                  )}
+                                  href={artifactLink(r.runId, a?.csv?.name || "compliance_table.csv")}
                                   label="compliance_table.csv"
                                   available={csvOk}
                                   title={a?.csv?.error || ""}

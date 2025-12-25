@@ -2,23 +2,35 @@
 import fs from "node:fs";
 import path from "node:path";
 
-export const RUNS_DIR = path.join(process.cwd(), "runs");
-
 /**
- * Vercel Serverless / Functions filesystem is ephemeral / often read-only for writes.
- * We keep local behavior unchanged, but disable persistence on Vercel to avoid runtime errors.
+ * Local: keep exactly the same behavior as before -> ./runs
+ * Vercel (Serverless): use writable ephemeral filesystem -> /tmp/runs
+ *
+ * This makes the demo work on Vercel without crashing, while keeping local unchanged.
  *
  * You can override manually:
- * - FORCE_RUNS_PERSIST=1  => always allow writes (not recommended on Vercel)
- * - DISABLE_RUNS_PERSIST=1 => always disable writes (useful for demo mode)
+ * - RUNS_DIR=/some/path            => force a custom runs directory
+ * - DISABLE_RUNS_PERSIST=1         => always disable writes/reads (demo no-history mode)
  */
+function resolveRunsDir(): string {
+  // Manual override first
+  const override = process.env.RUNS_DIR;
+  if (override && override.trim()) return path.resolve(override.trim());
+
+  // Vercel sets VERCEL=1 at runtime
+  if (process.env.VERCEL === "1") return "/tmp/runs";
+
+  // Local/default
+  return path.join(process.cwd(), "runs");
+}
+
+export const RUNS_DIR = resolveRunsDir();
+
 function isRunsPersistenceEnabled(): boolean {
+  // Explicit disable wins
   if (process.env.DISABLE_RUNS_PERSIST === "1") return false;
-  if (process.env.FORCE_RUNS_PERSIST === "1") return true;
 
-  // Vercel sets VERCEL=1 in runtime
-  if (process.env.VERCEL === "1") return false;
-
+  // Default: enabled everywhere (local + Vercel) because Vercel will use /tmp
   return true;
 }
 
@@ -54,8 +66,7 @@ function safeFileName(name: string) {
   // Normalize separators
   const normalized = n.replace(/\\/g, "/");
 
-  // Forbid traversal segments explicitly
-  // (normalize first to handle things like "a/../b")
+  // Normalize path (posix) and forbid traversal
   const cleaned = path.posix.normalize(normalized);
 
   if (cleaned === "." || cleaned === "..") throw new Error("Invalid file name.");
@@ -106,17 +117,11 @@ function writeFileAtomic(filePath: string, data: Buffer | string) {
 }
 
 /**
- * Writes a file under ./runs/<runId>/<name>
+ * Writes a file under RUNS_DIR/<runId>/<name>
  * Accepts Buffer/string, and safely handles undefined/null to avoid crashes.
- *
- * On Vercel: NO-OP (disabled persistence), so the API can still return artifacts
- * without trying to write local files.
  */
 export function writeRunFile(runId: string, name: string, content: unknown) {
-  if (!isRunsPersistenceEnabled()) {
-    // no-op on Vercel / demo mode
-    return;
-  }
+  if (!isRunsPersistenceEnabled()) return;
 
   ensureRunsDir();
 
@@ -141,12 +146,11 @@ export function writeRunFile(runId: string, name: string, content: unknown) {
 }
 
 export function listRuns(): Array<{ runId: string; createdAt: string }> {
-  if (!isRunsPersistenceEnabled()) {
-    // No run history on Vercel (ephemeral storage)
-    return [];
-  }
+  if (!isRunsPersistenceEnabled()) return [];
 
   ensureRunsDir();
+
+  if (!fs.existsSync(RUNS_DIR)) return [];
 
   const dirs = fs
     .readdirSync(RUNS_DIR, { withFileTypes: true })
@@ -179,6 +183,7 @@ export function readRunFile(runId: string, name: string): Buffer {
   const dir = safeRunDir(runId);
   const safeName = safeFileName(name);
   const p = path.join(dir, safeName);
+
   return fs.readFileSync(p);
 }
 
@@ -194,7 +199,7 @@ export function runExists(runId: string): boolean {
 }
 
 /**
- * Deletes the entire run folder: ./runs/<runId>
+ * Deletes the entire run folder: RUNS_DIR/<runId>
  * Returns true if deleted, false if not deleted.
  */
 export function deleteRun(runId: string): boolean {
