@@ -147,6 +147,13 @@ type RunListItem = {
 
 type VerifierMode = "llm_auditor" | "local_only";
 
+type InlineArtifacts = {
+  html?: { name: string; content: string; bytes: number };
+  csv?: { name: string; content: string; bytes: number };
+  jsonl?: { name: string; content: string; bytes: number };
+  pdf?: { name: string; base64: string; bytes: number };
+};
+
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
 }
@@ -576,11 +583,13 @@ function ArtifactPill({
   label,
   available,
   title,
+  onClick,
 }: {
   href: string;
   label: string;
   available: boolean;
   title?: string;
+  onClick?: (e: React.MouseEvent<HTMLAnchorElement>) => void;
 }) {
   if (!available) {
     return (
@@ -597,6 +606,7 @@ function ArtifactPill({
       className="text-sm text-indigo-600 underline underline-offset-4 decoration-indigo-200 hover:decoration-indigo-400"
       href={href}
       title={title}
+      onClick={onClick}
     >
       {label}
     </a>
@@ -624,7 +634,8 @@ async function fetchRunMeta(
     if (!out.ok) return null;
 
     // GET /api/runs/:runId returns: { ok: true, runId, meta }
-    if (out.json && out.json.meta && typeof out.json.meta === "object") return out.json.meta as RunMeta;
+    if (out.json && out.json.meta && typeof out.json.meta === "object")
+      return out.json.meta as RunMeta;
     return null;
   } catch {
     onDemoDetected();
@@ -644,6 +655,44 @@ function fmtUsd(n: number, digits = 6) {
 function fmtMs(n: number) {
   const v = Number.isFinite(n) ? n : 0;
   return `${Math.round(v).toLocaleString("en-US")} ms`;
+}
+
+/**
+ * Vercel-only helper: download/open inline artifacts returned by /api/run
+ */
+function extFromName(name: string) {
+  const i = name.lastIndexOf(".");
+  return i >= 0 ? name.slice(i).toLowerCase() : "";
+}
+
+function mimeFromExt(ext: string) {
+  if (ext === ".pdf") return "application/pdf";
+  if (ext === ".html") return "text/html; charset=utf-8";
+  if (ext === ".csv") return "text/csv; charset=utf-8";
+  if (ext === ".jsonl") return "application/x-ndjson; charset=utf-8";
+  if (ext === ".json") return "application/json; charset=utf-8";
+  return "application/octet-stream";
+}
+
+function base64ToUint8Array(base64: string) {
+  const bin = atob(base64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+function triggerDownload(url: string, filename: string) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.rel = "noreferrer";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function openInNewTab(url: string) {
+  window.open(url, "_blank", "noopener,noreferrer");
 }
 
 /**
@@ -712,6 +761,9 @@ export default function Page() {
   );
 
   const [running, setRunning] = useState(false);
+
+  // ✅ Vercel: store inline artifacts from /api/run
+  const [inlineArtifacts, setInlineArtifacts] = useState<InlineArtifacts | null>(null);
 
   // Latest run summary returned by /api/run
   const [runResult, setRunResult] = useState<{
@@ -788,7 +840,7 @@ export default function Page() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Keep latest meta synced (so Latest run links never 404)
+  // Keep latest meta synced (so Latest run links never 404 on local, and inline works on Vercel)
   useEffect(() => {
     const runId = runResult?.runId;
     if (!runId) {
@@ -849,11 +901,81 @@ export default function Page() {
     }
   }
 
+  function getInlineByNameOrKey(name: string): { kind: keyof InlineArtifacts; fileName: string } | null {
+    if (!inlineArtifacts) return null;
+
+    // We map by ext/name to the right slot
+    const ext = extFromName(name);
+    if (ext === ".html" && inlineArtifacts.html) return { kind: "html", fileName: inlineArtifacts.html.name || name };
+    if (ext === ".csv" && inlineArtifacts.csv) return { kind: "csv", fileName: inlineArtifacts.csv.name || name };
+    if ((ext === ".jsonl" || ext === ".ndjson") && inlineArtifacts.jsonl)
+      return { kind: "jsonl", fileName: inlineArtifacts.jsonl.name || name };
+    if (ext === ".pdf" && inlineArtifacts.pdf) return { kind: "pdf", fileName: inlineArtifacts.pdf.name || name };
+
+    // meta.json is not included inline in your API currently; keep local route for local only
+    return null;
+  }
+
+  function handleInlineDownload(name: string) {
+    if (!inlineArtifacts) return;
+
+    const hit = getInlineByNameOrKey(name);
+    if (!hit) return;
+
+    const ext = extFromName(name);
+    const mime = mimeFromExt(ext);
+
+    if (hit.kind === "pdf") {
+      const base64 = inlineArtifacts.pdf?.base64 || "";
+      if (!base64) return;
+      const bytes = base64ToUint8Array(base64);
+      const blob = new Blob([bytes], { type: mime });
+      const url = URL.createObjectURL(blob);
+
+      // PDF: open inline
+      openInNewTab(url);
+
+      // cleanup later
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      return;
+    }
+
+    // Text-like: html/csv/jsonl
+    const content =
+      hit.kind === "html"
+        ? inlineArtifacts.html?.content
+        : hit.kind === "csv"
+        ? inlineArtifacts.csv?.content
+        : inlineArtifacts.jsonl?.content;
+
+    if (typeof content !== "string") return;
+
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+
+    if (ext === ".html") {
+      // HTML: open inline in new tab
+      openInNewTab(url);
+    } else {
+      // CSV/JSONL: download
+      const filename =
+        hit.kind === "csv"
+          ? inlineArtifacts.csv?.name || name
+          : hit.kind === "jsonl"
+          ? inlineArtifacts.jsonl?.name || name
+          : name;
+      triggerDownload(url, filename);
+    }
+
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
+
   async function run() {
     setError("");
     setErrorDetails(null);
     setRunResult(null);
     setLatestMeta(null);
+    setInlineArtifacts(null);
 
     if (!specStatus.ok) {
       setError("Your spec is not valid yet. Fix it before running.");
@@ -920,6 +1042,11 @@ export default function Page() {
         return;
       }
 
+      // ✅ Capture inline artifacts on Vercel/demo mode
+      if (payload?.artifacts_inline && typeof payload.artifacts_inline === "object") {
+        setInlineArtifacts(payload.artifacts_inline as InlineArtifacts);
+      }
+
       const totalsParsed = RunTotalsSchema.safeParse(payload.totals);
 
       setRunResult({
@@ -968,6 +1095,7 @@ export default function Page() {
       if (runResult?.runId === runId) {
         setRunResult(null);
         setLatestMeta(null);
+        setInlineArtifacts(null);
       }
     } catch (e: any) {
       setError(e?.message ?? `Failed to delete run ${runId}.`);
@@ -988,19 +1116,43 @@ export default function Page() {
 
   const latestAvailability = useMemo(() => {
     const a = latestArtifacts;
+
+    // ✅ On Vercel: availability driven by inline artifacts presence
+    if (IS_VERCEL) {
+      return {
+        html: Boolean(inlineArtifacts?.html?.content),
+        pdf: Boolean(inlineArtifacts?.pdf?.base64),
+        csv: Boolean(inlineArtifacts?.csv?.content),
+        jsonl: Boolean(inlineArtifacts?.jsonl?.content),
+      };
+    }
+
+    // Local: from artifacts status
     return {
       html: Boolean(a?.html?.available),
       pdf: Boolean(a?.pdf?.available),
       csv: Boolean(a?.csv?.available),
       jsonl: Boolean(a?.jsonl?.available),
     };
-  }, [latestArtifacts]);
+  }, [latestArtifacts, IS_VERCEL, inlineArtifacts]);
 
   const latestArtifactLinks = useMemo(() => {
     const runId = runResult?.runId;
     if (!runId) return null;
     const a = latestArtifacts;
 
+    // ✅ On Vercel: keep href as "#"; click handler will open/download inline artifacts
+    if (IS_VERCEL) {
+      return {
+        html: "#",
+        pdf: "#",
+        csv: "#",
+        jsonl: "#",
+        meta: "#",
+      };
+    }
+
+    // Local: filesystem persisted downloads
     return {
       html: artifactLink(runId, a?.html?.name || "report.html"),
       pdf: artifactLink(runId, a?.pdf?.name || "report.pdf"),
@@ -1008,7 +1160,7 @@ export default function Page() {
       jsonl: artifactLink(runId, a?.jsonl?.name || "violations.jsonl"),
       meta: `/api/runs/${encodeURIComponent(runId)}/download/meta.json`,
     };
-  }, [runResult?.runId, latestArtifacts]);
+  }, [runResult?.runId, latestArtifacts, IS_VERCEL]);
 
   const latestRunDerived = useMemo(() => {
     const totals = runResult?.totals;
@@ -1849,32 +2001,77 @@ export default function Page() {
                           </div>
                         ) : null}
 
+                        {IS_VERCEL && !inlineArtifacts ? (
+                          <div className="mt-2 text-xs text-slate-500">
+                            ⏳ Waiting for inline artifacts... (run the harness and then download immediately)
+                          </div>
+                        ) : null}
+
                         <div className="mt-2 flex flex-wrap gap-2">
                           <ArtifactPill
                             href={latestArtifactLinks?.html || "#"}
                             label="report.html"
                             available={latestAvailability.html}
                             title={latestArtifacts?.html?.error || ""}
+                            onClick={
+                              IS_VERCEL
+                                ? (e) => {
+                                    e.preventDefault();
+                                    handleInlineDownload("report.html");
+                                  }
+                                : undefined
+                            }
                           />
                           <ArtifactPill
                             href={latestArtifactLinks?.pdf || "#"}
                             label="report.pdf"
                             available={latestAvailability.pdf}
                             title={latestArtifacts?.pdf?.error || ""}
+                            onClick={
+                              IS_VERCEL
+                                ? (e) => {
+                                    e.preventDefault();
+                                    handleInlineDownload("report.pdf");
+                                  }
+                                : undefined
+                            }
                           />
                           <ArtifactPill
                             href={latestArtifactLinks?.csv || "#"}
                             label="compliance_table.csv"
                             available={latestAvailability.csv}
                             title={latestArtifacts?.csv?.error || ""}
+                            onClick={
+                              IS_VERCEL
+                                ? (e) => {
+                                    e.preventDefault();
+                                    handleInlineDownload("compliance_table.csv");
+                                  }
+                                : undefined
+                            }
                           />
                           <ArtifactPill
                             href={latestArtifactLinks?.jsonl || "#"}
                             label="violations.jsonl"
                             available={latestAvailability.jsonl}
                             title={latestArtifacts?.jsonl?.error || ""}
+                            onClick={
+                              IS_VERCEL
+                                ? (e) => {
+                                    e.preventDefault();
+                                    handleInlineDownload("violations.jsonl");
+                                  }
+                                : undefined
+                            }
                           />
-                          <ArtifactPill href={latestArtifactLinks?.meta || "#"} label="meta.json" available={true} />
+
+                          {/* meta.json: only local persisted path. On Vercel we disable because there's no disk meta.json to fetch. */}
+                          <ArtifactPill
+                            href={latestArtifactLinks?.meta || "#"}
+                            label="meta.json"
+                            available={!IS_VERCEL}
+                            title={IS_VERCEL ? "Demo mode: meta.json is not persisted." : ""}
+                          />
                         </div>
 
                         {!latestMeta ? (
