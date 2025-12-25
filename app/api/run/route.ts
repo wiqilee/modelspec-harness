@@ -170,6 +170,20 @@ export async function POST(req: Request) {
   const baseMeta: RunMeta = { runId, createdAt };
   const persistenceEnabled = isRunsPersistenceEnabled();
 
+  // Always define inline collector early so even error paths can include it on Vercel.
+  const inline: InlineArtifacts = {};
+  const vercelInlineEnabled = !persistenceEnabled;
+
+  const withInline = (payload: any) => {
+    if (!vercelInlineEnabled) return payload;
+    return {
+      ...payload,
+      artifacts_inline: inline, // always present on Vercel, even if empty
+      notice:
+        "Runs persistence is disabled in this environment (e.g. Vercel). Artifacts are returned inline when available.",
+    };
+  };
+
   // Seed meta.json early (best-effort). On Vercel this may be a no-op.
   try {
     const seedMeta: RunMeta = {
@@ -196,7 +210,7 @@ export async function POST(req: Request) {
     const specParsed = SpecSchema.safeParse(specObj);
     if (!specParsed.success) {
       return NextResponse.json(
-        { error: "Invalid spec YAML.", details: specParsed.error.flatten() },
+        withInline({ error: "Invalid spec YAML.", details: specParsed.error.flatten() }),
         { status: 400 }
       );
     }
@@ -204,7 +218,7 @@ export async function POST(req: Request) {
 
     // Validate cases
     if (!Array.isArray(body.cases) || body.cases.length === 0) {
-      return NextResponse.json({ error: "Add at least one test case." }, { status: 400 });
+      return NextResponse.json(withInline({ error: "Add at least one test case." }), { status: 400 });
     }
 
     const cases = body.cases.map((c) => {
@@ -226,7 +240,7 @@ export async function POST(req: Request) {
     // Validate selected models
     const rawModelIds = normalizeModels(body.models);
     if (rawModelIds.length === 0) {
-      return NextResponse.json({ error: "No models selected." }, { status: 400 });
+      return NextResponse.json(withInline({ error: "No models selected." }), { status: 400 });
     }
 
     let modelIds: string[] = [];
@@ -236,10 +250,10 @@ export async function POST(req: Request) {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Invalid model id(s).";
       return NextResponse.json(
-        {
+        withInline({
           error: msg || "Invalid model id(s). Select models from the registry list.",
           debug: { selected: rawModelIds, allowed: MODEL_REGISTRY.map((m) => m.id) },
-        },
+        }),
         { status: 400 }
       );
     }
@@ -267,10 +281,10 @@ export async function POST(req: Request) {
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : `Invalid auditor model "${auditorModelId}".`;
         return NextResponse.json(
-          {
+          withInline({
             error: msg,
             debug: { auditorModelId, allowed: MODEL_REGISTRY.map((m) => m.id) },
-          },
+          }),
           { status: 400 }
         );
       }
@@ -472,14 +486,14 @@ export async function POST(req: Request) {
       }
 
       return NextResponse.json(
-        {
+        withInline({
           error: "All model-runs failed.",
           hint:
             "Common causes: missing/invalid provider API keys, unsupported model name, base URL mismatch, quota/credit limits, or network/timeout.",
           env: envDiag,
           details: jobErrors.slice(0, 50),
           runId,
-        },
+        }),
         { status: 500 }
       );
     }
@@ -524,7 +538,6 @@ export async function POST(req: Request) {
     };
 
     const warnings: string[] = [];
-    const inline: InlineArtifacts = {};
 
     const artifactStatus = {
       html: { name: "report.html", available: false, createdAt: nowIso() } as ArtifactStatus,
@@ -537,6 +550,7 @@ export async function POST(req: Request) {
     let jsonlContent = "";
     try {
       jsonlContent = (violationsJsonl.length ? violationsJsonl.join("\n") : "") + "\n";
+
       if (persistenceEnabled) {
         await safeWriteRunFile(runId, "violations.jsonl", jsonlContent);
       } else {
@@ -546,12 +560,14 @@ export async function POST(req: Request) {
           bytes: byteLenUtf8(jsonlContent),
         };
       }
+
       artifactStatus.jsonl.available = true;
       artifactStatus.jsonl.bytes = byteLenUtf8(jsonlContent);
       artifactStatus.jsonl.createdAt = nowIso();
     } catch (e: unknown) {
       artifactStatus.jsonl.available = false;
-      artifactStatus.jsonl.error = safeString((e as any)?.message) || "Failed to write violations.jsonl";
+      artifactStatus.jsonl.error =
+        safeString((e as any)?.message) || "Failed to write violations.jsonl";
       warnings.push(`jsonl: ${artifactStatus.jsonl.error}`);
     }
 
@@ -560,17 +576,24 @@ export async function POST(req: Request) {
     try {
       csvContent = toCSV(bundle.rows);
       if (typeof csvContent !== "string") throw new Error("toCSV() must return a string.");
+
       if (persistenceEnabled) {
         await safeWriteRunFile(runId, "compliance_table.csv", csvContent);
       } else {
-        inline.csv = { name: "compliance_table.csv", content: csvContent, bytes: byteLenUtf8(csvContent) };
+        inline.csv = {
+          name: "compliance_table.csv",
+          content: csvContent,
+          bytes: byteLenUtf8(csvContent),
+        };
       }
+
       artifactStatus.csv.available = true;
       artifactStatus.csv.bytes = byteLenUtf8(csvContent);
       artifactStatus.csv.createdAt = nowIso();
     } catch (e: unknown) {
       artifactStatus.csv.available = false;
-      artifactStatus.csv.error = safeString((e as any)?.message) || "Failed to write compliance_table.csv";
+      artifactStatus.csv.error =
+        safeString((e as any)?.message) || "Failed to write compliance_table.csv";
       warnings.push(`csv: ${artifactStatus.csv.error}`);
     }
 
@@ -579,11 +602,17 @@ export async function POST(req: Request) {
     try {
       htmlContent = toHTML(bundle);
       if (typeof htmlContent !== "string") throw new Error("toHTML() must return a string.");
+
       if (persistenceEnabled) {
         await safeWriteRunFile(runId, "report.html", htmlContent);
       } else {
-        inline.html = { name: "report.html", content: htmlContent, bytes: byteLenUtf8(htmlContent) };
+        inline.html = {
+          name: "report.html",
+          content: htmlContent,
+          bytes: byteLenUtf8(htmlContent),
+        };
       }
+
       artifactStatus.html.available = true;
       artifactStatus.html.bytes = byteLenUtf8(htmlContent);
       artifactStatus.html.createdAt = nowIso();
@@ -644,9 +673,10 @@ export async function POST(req: Request) {
     }
 
     // If HTML failed => still return error (primary artifact)
+    // On Vercel, still include artifacts_inline (maybe csv/jsonl/pdf exist).
     if (!artifactStatus.html.available) {
       return NextResponse.json(
-        {
+        withInline({
           error: "Run completed but failed to generate report.html (primary artifact).",
           runId,
           createdAt,
@@ -654,7 +684,7 @@ export async function POST(req: Request) {
           totals,
           warnings,
           debug: { jobErrors: jobErrors.slice(0, 10), artifacts: finalMeta.artifacts },
-        },
+        }),
         { status: 500 }
       );
     }
@@ -673,11 +703,11 @@ export async function POST(req: Request) {
       },
     };
 
-    // On Vercel / when persistence disabled, return artifacts inline so users can still download.
-    if (!persistenceEnabled) {
+    // On Vercel / when persistence disabled, always return artifacts_inline (even if empty).
+    if (vercelInlineEnabled) {
       res.artifacts_inline = inline;
       res.notice =
-        "Runs persistence is disabled in this environment (e.g. Vercel). Artifacts are returned inline.";
+        "Runs persistence is disabled in this environment (e.g. Vercel). Artifacts are returned inline when available.";
     }
 
     return NextResponse.json(res);
@@ -704,7 +734,7 @@ export async function POST(req: Request) {
     }
 
     return NextResponse.json(
-      {
+      withInline({
         error: safeString((e as any)?.message) || "Run failed",
         runId,
         details: [
@@ -715,7 +745,7 @@ export async function POST(req: Request) {
             message: safeString((e as any)?.message) || "Run failed",
           },
         ],
-      },
+      }),
       { status: 500 }
     );
   }

@@ -2,9 +2,6 @@
 import "server-only";
 
 import Papa from "papaparse";
-import PDFDocument from "pdfkit";
-import * as fs from "node:fs";
-import path from "node:path";
 import type { ComplianceRow, RunBundle } from "./types";
 
 /**
@@ -956,8 +953,30 @@ export function toHTML(bundle: RunBundle): string {
  * IMPORTANT (fixes your TS errors):
  * - No template literals inside the PDF section (prevents stray backticks / unterminated literals)
  * - Avoid any invisible “invalid characters” from copy/paste by using plain ASCII in PDF strings
+ *
+ * ✅ VERCEL-SAFE CHANGE (Node-only deps are loaded lazily):
+ * - Avoid top-level imports of `pdfkit`, `node:fs`, `node:path` so this file won’t crash builds
+ *   if something accidentally gets evaluated in Edge bundles.
+ * - If called in Edge runtime, we fail fast with a clear error.
  */
 export function toPDF(bundle: RunBundle): Promise<Buffer> {
+  // Fail fast if someone tries to run this in Edge.
+  // (Edge runtime has no `fs`/`path`/`pdfkit` support.)
+  if (process.env.NEXT_RUNTIME === "edge") {
+    return Promise.reject(
+      new Error("toPDF failed: PDF generation requires Node.js runtime (not Edge).")
+    );
+  }
+
+  // Lazy-load Node-only deps (keeps Vercel bundling safer)
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const fs = require("node:fs") as typeof import("node:fs");
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const path = require("node:path") as typeof import("node:path");
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const PDFDocumentMod = require("pdfkit") as any;
+  const PDFDocument = (PDFDocumentMod?.default ?? PDFDocumentMod) as typeof import("pdfkit");
+
   type PDFDoc = InstanceType<typeof PDFDocument>;
 
   const safeNum = (n: unknown, fallback = 0) =>
@@ -1600,7 +1619,15 @@ export function toPDF(bundle: RunBundle): Promise<Buffer> {
                       : x.low > 0
                         ? "Low"
                         : "None";
-              const counts = "C:" + String(x.critical) + " H:" + String(x.high) + " M:" + String(x.medium) + " L:" + String(x.low);
+              const counts =
+                "C:" +
+                String(x.critical) +
+                " H:" +
+                String(x.high) +
+                " M:" +
+                String(x.medium) +
+                " L:" +
+                String(x.low);
               return (
                 x.case_id +
                 " / " +
@@ -1713,7 +1740,14 @@ export function toPDF(bundle: RunBundle): Promise<Buffer> {
           crit: x + widths.case + widths.model + widths.status,
           high: x + widths.case + widths.model + widths.status + widths.crit,
           med: x + widths.case + widths.model + widths.status + widths.crit + widths.high,
-          low: x + widths.case + widths.model + widths.status + widths.crit + widths.high + widths.med,
+          low:
+            x +
+            widths.case +
+            widths.model +
+            widths.status +
+            widths.crit +
+            widths.high +
+            widths.med,
           ms:
             x +
             widths.case +

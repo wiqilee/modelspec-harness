@@ -21,7 +21,7 @@ import { MODEL_REGISTRY, DEFAULT_AUDITOR_MODEL_ID } from "@/lib/providerModels";
 /**
  * ✅ Vercel demo guard (AUTO):
  * - Local: run history works (./runs)
- * - Vercel: if /api/runs or /api/runs/:id returns HTML (non-JSON), we auto-switch to demo mode
+ * - Vercel/stateless: run history + /api/runs download links 404 (no persistence)
  *
  * Optional explicit override:
  *   NEXT_PUBLIC_VERCEL=1
@@ -30,6 +30,13 @@ const ENV_SAYS_VERCEL =
   process.env.NEXT_PUBLIC_VERCEL === "1" ||
   process.env.NEXT_PUBLIC_VERCEL === "true" ||
   process.env.NEXT_PUBLIC_VERCEL === "yes";
+
+// Extra auto-detect for hosted deployments (no env needed)
+function hostLooksHostedStateless() {
+  if (typeof window === "undefined") return false;
+  const h = window.location.hostname.toLowerCase();
+  return h.endsWith(".vercel.app") || h.includes("vercel.app");
+}
 
 type CaseRow = { id: string; task: string; context: string };
 
@@ -183,7 +190,7 @@ function formatDetailLine(d: ErrorDetailItem): string {
 
 /**
  * ✅ Safe JSON fetch:
- * Prevents "Unexpected token '<'" when Vercel returns an HTML error page.
+ * Prevents "Unexpected token '<'" when hosted returns an HTML error page.
  */
 async function safeFetchJson<T = any>(
   url: string,
@@ -658,7 +665,7 @@ function fmtMs(n: number) {
 }
 
 /**
- * Vercel-only helper: download/open inline artifacts returned by /api/run
+ * Vercel-only helper: open/download inline artifacts returned by /api/run
  */
 function extFromName(name: string) {
   const i = name.lastIndexOf(".");
@@ -670,6 +677,7 @@ function mimeFromExt(ext: string) {
   if (ext === ".html") return "text/html; charset=utf-8";
   if (ext === ".csv") return "text/csv; charset=utf-8";
   if (ext === ".jsonl") return "application/x-ndjson; charset=utf-8";
+  if (ext === ".ndjson") return "application/x-ndjson; charset=utf-8";
   if (ext === ".json") return "application/json; charset=utf-8";
   return "application/octet-stream";
 }
@@ -692,7 +700,14 @@ function triggerDownload(url: string, filename: string) {
 }
 
 function openInNewTab(url: string) {
-  window.open(url, "_blank", "noopener,noreferrer");
+  // Use an anchor click (more reliable on some browsers than window.open with blob URLs)
+  const a = document.createElement("a");
+  a.href = url;
+  a.target = "_blank";
+  a.rel = "noopener,noreferrer";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 /**
@@ -728,12 +743,19 @@ function NativeActionButton({
 // ===== Page =====
 
 export default function Page() {
-  // ✅ Auto demo mode:
-  // - Starts from env hint
-  // - If /api/runs or /api/runs/:id returns non-JSON/HTML, we auto-flip to demo mode
+  // ✅ Demo mode:
+  // - starts from env hint
+  // - plus hostname hint (.vercel.app)
+  // - plus auto-detect when /api/runs returns HTML
   const [demoMode, setDemoMode] = useState<boolean>(ENV_SAYS_VERCEL);
-  const IS_VERCEL = demoMode;
   const enableDemoMode = () => setDemoMode(true);
+  const IS_VERCEL = demoMode;
+
+  // On mount: hostname-based detection (so user won't click before refreshRuns flips it)
+  useEffect(() => {
+    if (ENV_SAYS_VERCEL) return;
+    if (hostLooksHostedStateless()) setDemoMode(true);
+  }, []);
 
   const [specYaml, setSpecYaml] = useState<string>(StarterSpec);
   const [cases, setCases] = useState<CaseRow[]>(StarterCases);
@@ -762,7 +784,7 @@ export default function Page() {
 
   const [running, setRunning] = useState(false);
 
-  // ✅ Vercel: store inline artifacts from /api/run
+  // ✅ Hosted/stateless: store inline artifacts from /api/run
   const [inlineArtifacts, setInlineArtifacts] = useState<InlineArtifacts | null>(null);
 
   // Latest run summary returned by /api/run
@@ -835,12 +857,11 @@ export default function Page() {
   }
 
   useEffect(() => {
-    // Try load runs; if hosted returns HTML, we'll flip to demo mode automatically.
     refreshRuns().catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Keep latest meta synced (so Latest run links never 404 on local, and inline works on Vercel)
+  // Keep latest meta synced
   useEffect(() => {
     const runId = runResult?.runId;
     if (!runId) {
@@ -901,18 +922,21 @@ export default function Page() {
     }
   }
 
-  function getInlineByNameOrKey(name: string): { kind: keyof InlineArtifacts; fileName: string } | null {
+  function getInlineByNameOrKey(
+    name: string
+  ): { kind: keyof InlineArtifacts; fileName: string } | null {
     if (!inlineArtifacts) return null;
 
-    // We map by ext/name to the right slot
     const ext = extFromName(name);
-    if (ext === ".html" && inlineArtifacts.html) return { kind: "html", fileName: inlineArtifacts.html.name || name };
-    if (ext === ".csv" && inlineArtifacts.csv) return { kind: "csv", fileName: inlineArtifacts.csv.name || name };
+    if (ext === ".html" && inlineArtifacts.html)
+      return { kind: "html", fileName: inlineArtifacts.html.name || name };
+    if (ext === ".csv" && inlineArtifacts.csv)
+      return { kind: "csv", fileName: inlineArtifacts.csv.name || name };
     if ((ext === ".jsonl" || ext === ".ndjson") && inlineArtifacts.jsonl)
       return { kind: "jsonl", fileName: inlineArtifacts.jsonl.name || name };
-    if (ext === ".pdf" && inlineArtifacts.pdf) return { kind: "pdf", fileName: inlineArtifacts.pdf.name || name };
+    if (ext === ".pdf" && inlineArtifacts.pdf)
+      return { kind: "pdf", fileName: inlineArtifacts.pdf.name || name };
 
-    // meta.json is not included inline in your API currently; keep local route for local only
     return null;
   }
 
@@ -932,10 +956,7 @@ export default function Page() {
       const blob = new Blob([bytes], { type: mime });
       const url = URL.createObjectURL(blob);
 
-      // PDF: open inline
       openInNewTab(url);
-
-      // cleanup later
       window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
       return;
     }
@@ -954,10 +975,8 @@ export default function Page() {
     const url = URL.createObjectURL(blob);
 
     if (ext === ".html") {
-      // HTML: open inline in new tab
       openInNewTab(url);
     } else {
-      // CSV/JSONL: download
       const filename =
         hit.kind === "csv"
           ? inlineArtifacts.csv?.name || name
@@ -1042,9 +1061,11 @@ export default function Page() {
         return;
       }
 
-      // ✅ Capture inline artifacts on Vercel/demo mode
+      // ✅ If server returns inline artifacts, this is stateless-style behavior.
+      // Flip demo mode immediately so user never hits /api/runs/:id/download/... links.
       if (payload?.artifacts_inline && typeof payload.artifacts_inline === "object") {
         setInlineArtifacts(payload.artifacts_inline as InlineArtifacts);
+        setDemoMode(true);
       }
 
       const totalsParsed = RunTotalsSchema.safeParse(payload.totals);
@@ -1058,7 +1079,6 @@ export default function Page() {
         warnings: Array.isArray(payload?.warnings) ? payload.warnings : undefined,
       });
 
-      // Only refresh runs if not in demo mode (local)
       if (!IS_VERCEL) await refreshRuns();
     } catch (e: any) {
       setError(e?.message ?? "Run failed.");
@@ -1072,7 +1092,6 @@ export default function Page() {
     setError("");
     setErrorDetails(null);
 
-    // ✅ Guard: delete disabled on demo deployments
     if (IS_VERCEL) {
       setError("Run history is disabled on this demo deployment.");
       return;
@@ -1104,7 +1123,6 @@ export default function Page() {
     }
   }
 
-  // Source-of-truth: meta.json (fallback to runResult.debug.artifacts)
   const latestArtifacts: RunArtifacts | undefined = useMemo(() => {
     return latestMeta?.artifacts ?? runResult?.artifacts;
   }, [latestMeta, runResult]);
@@ -1117,7 +1135,6 @@ export default function Page() {
   const latestAvailability = useMemo(() => {
     const a = latestArtifacts;
 
-    // ✅ On Vercel: availability driven by inline artifacts presence
     if (IS_VERCEL) {
       return {
         html: Boolean(inlineArtifacts?.html?.content),
@@ -1127,7 +1144,6 @@ export default function Page() {
       };
     }
 
-    // Local: from artifacts status
     return {
       html: Boolean(a?.html?.available),
       pdf: Boolean(a?.pdf?.available),
@@ -1141,7 +1157,6 @@ export default function Page() {
     if (!runId) return null;
     const a = latestArtifacts;
 
-    // ✅ On Vercel: keep href as "#"; click handler will open/download inline artifacts
     if (IS_VERCEL) {
       return {
         html: "#",
@@ -1152,7 +1167,6 @@ export default function Page() {
       };
     }
 
-    // Local: filesystem persisted downloads
     return {
       html: artifactLink(runId, a?.html?.name || "report.html"),
       pdf: artifactLink(runId, a?.pdf?.name || "report.pdf"),
@@ -1295,12 +1309,12 @@ export default function Page() {
         .animatedRing {
           position: relative;
           isolation: isolate;
-          overflow: hidden; /* important: keeps ring clean and visible */
+          overflow: hidden;
         }
         .animatedRing::before {
           content: "";
           position: absolute;
-          inset: 0; /* no negative inset: prevents top edge "disappearing" */
+          inset: 0;
           border-radius: inherit;
           background: conic-gradient(
             from 0deg,
@@ -1321,7 +1335,7 @@ export default function Page() {
         .animatedRing::after {
           content: "";
           position: absolute;
-          inset: 2px; /* thickness of the ring */
+          inset: 2px;
           border-radius: calc(inherit - 2px);
           background: #ffffff;
           z-index: 1;
@@ -1487,8 +1501,8 @@ export default function Page() {
 
                 {IS_VERCEL ? (
                   <div className="mx-auto mt-3 max-w-3xl rounded-2xl border border-slate-200 bg-white p-3 text-xs text-slate-600">
-                    ℹ️ This is a stateless demo deployment. Run history is disabled; download artifacts
-                    right after each run.
+                    ℹ️ This is a stateless demo deployment. Run history is disabled; download
+                    artifacts right after each run.
                   </div>
                 ) : null}
               </div>
@@ -1533,8 +1547,8 @@ export default function Page() {
                 <div>
                   <div className="text-sm font-semibold text-slate-900">🧭 {guideLineTitle}</div>
                   <div className="mt-1 text-xs leading-5 text-slate-600">
-                    Treat this like a policy unit-test runner: define rules, add prompts, run the same
-                    cases across models, and share the report or run it in CI.
+                    Treat this like a policy unit-test runner: define rules, add prompts, run the
+                    same cases across models, and share the report or run it in CI.
                   </div>
                 </div>
 
@@ -1626,8 +1640,8 @@ export default function Page() {
                 </div>
 
                 <div className="mt-2 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-xs leading-5 text-slate-600">
-                  <b>💡 Tip:</b> start with a few rules (2–5), run a small set of cases, then tighten
-                  the rules after you observe model behavior.
+                  <b>💡 Tip:</b> start with a few rules (2–5), run a small set of cases, then
+                  tighten the rules after you observe model behavior.
                 </div>
               </CardHeader>
 
@@ -1662,12 +1676,11 @@ export default function Page() {
                     <div className="mb-1 text-xs text-slate-500">Models (registry ids)</div>
                     <ModelPicker selected={selectedModels} onChange={setSelectedModels} />
                     <div className="mt-2 text-xs text-slate-500">
-                      Selected:{" "}
-                      <span className="font-mono break-all">{modelsToString(selectedModels)}</span>
+                      Selected: <span className="font-mono break-all">{modelsToString(selectedModels)}</span>
                     </div>
                     <div className="mt-2 text-xs text-slate-500">
-                      🧷 Provider-prefixed IDs (e.g., <span className="font-mono">openAI:...</span>,{" "}
-                      <span className="font-mono">Groq:...</span>).
+                      🧷 Provider-prefixed IDs (e.g., <span className="font-mono">openai:...</span>,{" "}
+                      <span className="font-mono">groq:...</span>).
                     </div>
                   </div>
 
@@ -1746,8 +1759,7 @@ export default function Page() {
                       ))}
                     </select>
                     <div className="mt-1 text-xs text-slate-500">
-                      🕵️ Used only when verifier mode is{" "}
-                      <span className="font-mono">llm_auditor</span>.
+                      🕵️ Used only when verifier mode is <span className="font-mono">llm_auditor</span>.
                     </div>
                   </div>
 
@@ -1919,8 +1931,7 @@ export default function Page() {
                         <div>
                           <div className="text-sm font-semibold">🧾 Run {runResult.runId}</div>
                           <div className="text-xs text-slate-500">
-                            🧩 Spec {runResult.specId} ·{" "}
-                            {new Date(runResult.createdAt).toLocaleString()}
+                            🧩 Spec {runResult.specId} · {new Date(runResult.createdAt).toLocaleString()}
                           </div>
                         </div>
                         <Badge tone="indigo">🧪 {runResult.totals.totalRows} model-runs</Badge>
@@ -1932,8 +1943,7 @@ export default function Page() {
                           {latestRunDerived ? (
                             <>
                               <b>📊 Overall pass rate:</b> {latestRunDerived.overallPassRate}% (
-                              {fmtInt(latestRunDerived.overallPass)} /{" "}
-                              {fmtInt(latestRunDerived.overallTotal)}).
+                              {fmtInt(latestRunDerived.overallPass)} / {fmtInt(latestRunDerived.overallTotal)}).
                               {latestRunDerived.best ? (
                                 <>
                                   {" "}
@@ -1955,8 +1965,7 @@ export default function Page() {
                           )}
                         </div>
                         <div className="mt-2 text-xs text-slate-600">
-                          <b>💡 Tip:</b> Open report.html for readability; use violations.jsonl for
-                          full evidence.
+                          <b>💡 Tip:</b> Open report.html for readability; use violations.jsonl for full evidence.
                         </div>
                       </div>
 
@@ -1970,9 +1979,7 @@ export default function Page() {
                               className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm transition hover:-translate-y-[1px] hover:shadow-md"
                             >
                               <div className="flex items-start justify-between gap-3">
-                                <div className="min-w-0 text-sm font-semibold break-words">
-                                  {m.model}
-                                </div>
+                                <div className="min-w-0 text-sm font-semibold break-words">{m.model}</div>
                                 <div className="shrink-0">
                                   <Badge tone={tone as any}>
                                     <span className="inline-flex items-center gap-1 whitespace-nowrap">
@@ -1984,8 +1991,8 @@ export default function Page() {
                               </div>
 
                               <div className="mt-1 text-xs text-slate-500">
-                                Pass {m.pass}/{m.total} · ⏱️ Avg latency {fmtMs(m.avg_latency_ms)} ·
-                                💵 Est. cost {fmtUsd(m.cost_usd, 4)}
+                                Pass {m.pass}/{m.total} · ⏱️ Avg latency {fmtMs(m.avg_latency_ms)} · 💵 Est. cost{" "}
+                                {fmtUsd(m.cost_usd, 4)}
                               </div>
                             </div>
                           );
@@ -2065,7 +2072,6 @@ export default function Page() {
                             }
                           />
 
-                          {/* meta.json: only local persisted path. On Vercel we disable because there's no disk meta.json to fetch. */}
                           <ArtifactPill
                             href={latestArtifactLinks?.meta || "#"}
                             label="meta.json"
@@ -2091,10 +2097,7 @@ export default function Page() {
               {!IS_VERCEL ? (
                 <Card className="transition hover:-translate-y-[1px] hover:shadow-md">
                   <CardHeader>
-                    <SectionTitle
-                      title="Run history"
-                      desc="Stored locally in ./runs for reproducible audits."
-                    />
+                    <SectionTitle title="Run history" desc="Stored locally in ./runs for reproducible audits." />
                   </CardHeader>
                   <CardContent>
                     {runs.length === 0 ? (
@@ -2244,8 +2247,7 @@ export default function Page() {
                   <div>
                     <div className="text-sm font-semibold text-slate-900">ModelSpec Harness</div>
                     <div className="text-xs text-slate-500">
-                      Built by <span className="brandNameGradient">Wiqi Lee</span> · Provider routing
-                      via OpenAI + Groq.
+                      Built by <span className="brandNameGradient">Wiqi Lee</span> · Provider routing via OpenAI + Groq.
                     </div>
                     <div className="text-xs text-slate-500">
                       Not affiliated with or endorsed by any provider.
