@@ -2,67 +2,67 @@
 
 Treat policies like code. Test them across models. Ship with confidence.
 
-**ModelSpec Harness** is a spec-driven, multi-model compliance harness for LLM workflows. Define a **policy / SOP / specification** once, run the same **test cases** across multiple **OpenAI + Groq** models, and export reproducible, audit-ready artifacts.
+**ModelSpec Harness** is a spec-driven, multi-model compliance harness for LLM workflows. Define a **policy, SOP, or specification** once, run the same **test suite** across **OpenAI and Groq** models, and export reproducible, audit-ready artifacts.
 
 ---
 
 ## 🚀 Live demo (Vercel)
 
-Demo: `https://modelspec-harness-wiqi.vercel.app/`
+**Live demo:** [modelspec-harness-wiqi.vercel.app](https://modelspec-harness-wiqi.vercel.app/)
 
-**Important note about downloads on the Vercel demo:** Vercel functions run in a **stateless** environment, so the demo does **not** persist artifacts to disk.  
-Instead, the API returns all artifacts **inline** in the `artifacts_inline` payload (HTML, CSV, JSONL, PDF), and the UI downloads from that inline data.
+**Note on downloads in the Vercel demo:** Vercel functions run in a stateless environment, so the demo does not persist artifacts to disk.  
+Instead, the API returns all artifacts inline via the `artifacts_inline` payload (HTML, CSV, JSONL, PDF), and the UI downloads them directly from that data.
 
-✅ **Local runs are unaffected** — when you run locally, artifacts are persisted under `./runs/<runId>/` and downloads work normally from disk.
+✅ **Local runs are unaffected.** When running locally, artifacts are persisted under `./runs/<runId>/`, and downloads work normally from disk.
 
 ---
 
 ## 🌟 Key benefits
 
 ### For engineering teams
-- Predictable, spec-based behavior testing instead of prompt guesswork
-- Deterministic checks that are stable and CI-safe
-- Easy model portability and side-by-side benchmarking
-- Clear reliability, latency, and cost tradeoffs
+- Predictable, spec-based behavior testing instead of prompt guesswork  
+- Deterministic checks that are stable and CI-friendly  
+- Easy model portability and side-by-side evaluations  
+- Clear visibility into reliability, latency, and cost trade-offs  
 
 ### For product and operations
-- Higher confidence at launch and after model upgrades
-- Faster iteration with reusable test cases
-- Early detection of policy drift and over-promising
+- Higher confidence at launch and after model upgrades  
+- Faster iteration with reusable test suites  
+- Early detection of policy drift and model overreach  
 
 ### For compliance and governance
-- Audit-ready HTML, PDF, CSV, and JSONL artifacts
-- Full reproducibility with local run history
-- Clear evidence and rule-level explanations
-- Deterministic-first design with optional LLM judgment
+- Audit-ready HTML, PDF, CSV, and JSONL artifacts  
+- Full reproducibility with local run history  
+- Clear evidence trails and rule-level explanations  
+- Deterministic-by-default design with optional LLM judgment  
 
 ---
 
-## 📦 What you get per run
+## 📦 What each run produces
 
-- ✅ PASS/FAIL per case and per model
+- ✅ PASS/FAIL per test case and per model
 - 🚨 Violations with severity (Critical, High, Medium, Low)
 - ⏱️ Latency and token usage
 - 💸 Cost estimates (rate-card configurable)
 - 📄 Shareable HTML reports
-- 🧾 Machine-readable evidence (JSONL)
+- 🧾 Machine-readable artifacts (JSONL)
 
-Built by **Wiqi Lee** — 𝕏: **[@wiqi_lee](https://x.com/wiqi_lee)**  
-Provider routing: **OpenAI** + **Groq**
+Built by **Wiqi Lee** · 𝕏: **[@wiqi_lee](https://x.com/wiqi_lee)**  
+Supported providers: **OpenAI**, **Groq**
 
-> ⚠️ Disclaimer: This project is **not affiliated with or endorsed by OpenAI or Groq**.
+> ⚠️ Disclaimer: This project is **not affiliated with, endorsed by, or sponsored by OpenAI or Groq**.
 
 ---
 
 ## 🎯 Why this exists
 
-In real production workflows (support, operations, compliance, internal tools), failures are rarely about model intelligence. They are usually about:
+In real-world production workflows (support, operations, compliance, internal tools), failures rarely come from raw model capability. They usually come from:
 
-- the model not following policy or SOP
-- over-promising or unsafe commitments
-- behavioral drift across prompts, temperatures, or providers
-- lack of auditability and reproducibility
-- missing artifacts for review and sign-off
+- Policy or SOP non-compliance  
+- Over-promising or unsafe commitments  
+- Behavioral drift across prompts, temperatures, or providers  
+- Lack of auditability and reproducibility  
+- Missing artifacts for review and sign-off  
 
 ModelSpec Harness provides a **reproducible compliance gate** you can run locally or in CI.
 
@@ -72,20 +72,20 @@ ModelSpec Harness provides a **reproducible compliance gate** you can run locall
 
 ModelSpec Harness supports two complementary evaluation modes.
 
-### 1) Deterministic checks (local-only)
-Fast, repeatable, and CI-friendly rule validation, including:
-- required fields
-- forbidden phrases
-- max length constraints
-- pattern-based rules
+### 1) Deterministic checks (local, CI-friendly)
+Fast, repeatable rule validation that runs locally, including:
+- Required fields
+- Forbidden phrases
+- Max-length constraints
+- Pattern-based rules
 
 Use this mode for automated gating and baseline enforcement.
 
 ### 2) LLM auditor (strict JSON verdict)
-An optional second model call for nuanced judgment, such as:
-- implied promises
-- uncertainty handling
-- tone and subtle policy violations
+An optional second-pass audit using a separate model call for nuanced judgment, including:
+- Implied promises
+- Uncertainty handling
+- Tone and subtle policy violations
 
 Use this mode for deeper reviews and audit narratives.
 
@@ -93,25 +93,25 @@ Use this mode for deeper reviews and audit narratives.
 
 ## 📁 Run artifacts (audit-grade)
 
-Each run is stored locally under:
+Each run is saved locally under:
 
 `./runs/<runId>/`
 
-Artifacts include:
-- `meta.json` — run metadata and settings
-- `violations.jsonl` — evidence and rule hits
-- `compliance_table.csv` — spreadsheet-friendly summary
-- `report.html` — shareable review report
-- `report.pdf` — portable audit report
+Artifacts produced include:
+- `meta.json` — Run metadata and settings
+- `violations.jsonl` — Evidence and rule hits
+- `compliance_table.csv` — Spreadsheet-friendly summary
+- `report.html` — Shareable review report
+- `report.pdf` — Portable audit report
 
 ---
 
 ## 💸 Cost estimation
 
-Cost is an **estimate**, calculated from token usage multiplied by your configured rate card.
+Costs are **estimates**, computed from token usage multiplied by your configured rate card.
 
 - Useful for relative comparisons across models
-- Helpful for planning and tradeoff analysis
+- Helpful for planning and trade-off analysis
 - Not intended to match provider invoices
 
 ---
@@ -162,26 +162,25 @@ The UI uses **provider-prefixed model IDs**, for example:
 ## 🧩 Specs (YAML)
 
 A spec defines compliance rules such as:
-- required fields
-- forbidden phrases
-- uncertainty handling
-- max length constraints
+- Required fields
+- Forbidden phrases
+- Uncertainty handling
+- Max-length constraints
 
-The UI validates YAML before execution.
+The UI validates the YAML before execution.
 
 ---
 
 ## 🧪 CI-friendly usage
 
-Recommended CI pattern:
-- Use **Deterministic (local-only)** mode for stable gating
+Recommended CI workflow:
+- Use **Deterministic checks (local, CI-friendly)** for stable gating
 - Archive `./runs/<runId>/report.html`, `report.pdf`, `compliance_table.csv`, `violations.jsonl`, and `meta.json` as build artifacts
 
-Typical commands:
+Typical CI commands:
 ```bash
 npm run lint
 npm run build
-```
 
 ---
 
@@ -203,23 +202,23 @@ runs/           # generated artifacts (gitignored)
 
 ## 🧱 Tech stack
 
-- Next.js (App Router) and TypeScript
-- Tailwind CSS
-- p-limit for concurrency
-- pdfkit for PDF generation
-- js-yaml and zod for specs and validation
+- **Next.js** (App Router) + **TypeScript**
+- **Tailwind CSS**
+- `p-limit` for concurrency
+- `pdfkit` for PDF generation
+- `js-yaml` + `zod` for spec parsing and validation
 
 ---
 
 ## 🔐 Security and data handling
 
-- All artifacts are generated and stored locally under `./runs`
-- Specs and cases should not contain secrets or API keys
-- Reports may include prompts and model outputs; handle accordingly
-- Suitable for internal and controlled environments
+- All artifacts are generated and stored locally under `./runs/<runId>/`
+- Specs and test cases should never include secrets or API keys
+- Reports may include prompts and model outputs; handle and share accordingly
+- Intended for internal and controlled environments
 
 ---
 
 ## 📜 License
 
-- MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
